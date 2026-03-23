@@ -1,0 +1,77 @@
+FROM ubuntu:jammy
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Locale y utilidades básicas
+RUN apt-get update && apt-get install -y \
+    locales \
+    curl \
+    gnupg2 \
+    lsb-release \
+    software-properties-common \
+ && locale-gen en_US en_US.UTF-8 \
+ && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8
+
+# 2. Añadir repositorio de ROS 2 (clave nueva, formato moderno)
+RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
+ && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+      -o /usr/share/keyrings/ros-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+      http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+      > /etc/apt/sources.list.d/ros2.list
+
+# 3. Instalar ROS 2 + herramientas de desarrollo
+RUN apt-get update && apt-get install -y \
+    ros-humble-desktop \
+    python3-colcon-common-extensions \
+    python3-rosdep \
+    python3-vcstool \
+    ros-dev-tools \
+    # Dependencias extra que sabemos que hacen falta
+    libpcl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# 4. Inicializar rosdep dentro del contenedor
+RUN rosdep init || true && rosdep update
+
+# 5. Crear workspace
+WORKDIR /ros2_ws
+
+# OPCIÓN A: si tienes un .repos (recomendado)
+# COPY mapping_ros2.repos .
+# RUN vcs import src < mapping_ros2.repos
+
+# OPCIÓN B: si el repo mapping_ros2 es el contexto del build
+# (lo normal si estás en la carpeta del repo al hacer `docker build`)
+COPY src ./src
+
+# 6. Instalar dependencias con rosdep (saltando pcl que ya metemos a mano)
+# Antes de ejecutar rosdep, actualizar el cache de apt para que apt pueda
+# localizar los paquetes ros-humble-*. Limpiamos las listas al final para
+# mantener la imagen ligera.
+RUN bash -lc "apt-get update && \
+        source /opt/ros/humble/setup.bash && \
+        rosdep install --from-paths src --ignore-src -r -y \
+            --rosdistro humble \
+            --skip-keys='pcl' && \
+        rm -rf /var/lib/apt/lists/*"
+
+# 7. Compilar
+# Eliminar artefactos de build/install que pudieran haberse copiado desde el
+# host (contienen rutas absolutas) para forzar una compilación limpia en la
+# imagen y evitar que CMake use paths del sistema host.
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ENV ROS_DOMAIN_ID=0
+
+# # Copiar configuración FastDDS para comunicación entre contenedores
+# COPY fastdds_host.xml /root/fastdds_host.xml
+# ENV FASTRTPS_DEFAULT_PROFILES_FILE=/root/fastdds_host.xml
+
+RUN bash -lc "source /opt/ros/humble/setup.bash && \
+    colcon build "
+
+# 8. Entorno por defecto
+CMD [\"bash\"]

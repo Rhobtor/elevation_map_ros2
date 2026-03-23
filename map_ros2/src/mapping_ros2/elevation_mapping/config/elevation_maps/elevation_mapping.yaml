@@ -1,0 +1,46 @@
+elevation_mapping:
+  ros__parameters:
+    # Ventana local (rolling) y resolución
+    length_in_x: 10.0         # metros (ajusta 8–12 según tu UGV)
+    length_in_y: 10.0
+    resolution: 0.05          # 5 cm
+
+    # Mantén solo lo visto recientemente (no acumular histórico)
+    enable_continuous_cleanup: true   # limpia antes de cada nube
+
+    # No publiques mapa fusionado en bucle (ahorra CPU)
+    fused_map_publishing_rate: 0.0
+
+    # Limpieza por visibilidad (lenta y útil contra sombras de pared)
+    enable_visibility_cleanup: true
+    visibility_cleanup_rate: 0.5      # Hz
+
+    # Umbrales y ventanas (tuneados para UGV tipo ARGOS)
+    layers:
+      rough_window_m: 0.30
+      step_window_m:  0.25
+      slope_long_max_rad: 0.35   # ~20°
+      slope_lat_max_rad:  0.35
+      step_max_m:         40.05   # no sube escalones
+
+      cvar_alpha:     0.90
+      cvar_window_m:  0.50
+
+    # Toggles de capas
+    layers_enable:
+      slope: true
+      rough: true
+      step:  true
+      obstacles_binary: true
+      negative: true
+      cvar: true
+
+    # Frecuencia de capas “pesadas”
+    heavy_every_n: 3         # calcula negative & CVaR cada 3 nubes
+    cvar_tau: 0.70           # umbral para riesgo alto (0–1)
+
+    # Negative obstacles robusto (anti-paredes)
+    negative_drop_thresh_m: 0.20
+    negative_ring_m:        0.30
+    negative_min_valid:     0.30    # ≥30% del anillo válido
+    negative_slope_gate:    0.25    # rad (~14°): no marcar si la pendiente local es alta

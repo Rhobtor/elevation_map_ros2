@@ -1,0 +1,13 @@
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
+**/.colcon/
+**/compile_commands.json
+**/CMakeCache.txt
+**/CTestTestfile.cmake
+**/CTestConfiguration.ini
+**/cmake_install.cmake
+**/Makefile

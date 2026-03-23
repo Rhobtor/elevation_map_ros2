@@ -1,0 +1,46 @@
+/**:
+  ros__parameters:
+    inputs: ['ground_truth_cloud']
+    ground_truth_cloud: # A name to identify the input source
+      type: pointcloud # Supported types: pointcloud
+      topic: /zed/zed_node/point_cloud/cloud_registered
+      queue_size: 10
+      publish_on_update: true # Whether to publish the elevation map after a callback from this source.
+      sensor_processor:
+        # For debugging with ZED, start with 'perfect' so the node doesn't
+        # depend on a specific depth-noise model.
+        type: perfect
+    # ZED typically provides odometry in the 'odom' frame. If you don't have a
+    # separate localization publishing map->odom, use 'odom' here to get data.
+    # To publish in 'map', provide a TF from 'map' to 'odom' (e.g. SLAM) and
+    # change this back to 'map'.
+    map_frame_id: "map"
+    robot_base_frame_id: "velodyne"
+    robot_pose_with_covariance_topic: "/odom"
+    track_point_frame_id: "velodyne"
+    track_point_x: 0.0
+    track_point_y: 0.0
+    track_point_z: 0.0
+    use_sim_time: false
+
+# /**:
+#   ros__parameters:
+#     inputs: ['ground_truth_cloud']
+#     ground_truth_cloud: # A name to identify the input source
+#       type: pointcloud # Supported types: pointcloud
+#       # topic: /merged_points_filtered
+#       topic: /merged_points_filtered
+#       queue_size: 10
+#       publish_on_update: true # Whether to publish the elevation map after a callback from this source.
+#       sensor_processor:
+#         type: laser
+#     map_frame_id: "map"
+#     robot_base_frame_id: "base_link"
+#     robot_pose_with_covariance_topic: "/fixposition/odometry"
+#     robot_pose_topic: "/fixposition/odometry"
+#     track_point_frame_id: "base_link"
+#     track_point_x: 0.0
+#     track_point_y: 0.0
+#     track_point_z: 0.0
+#     use_sim_time: true
+
