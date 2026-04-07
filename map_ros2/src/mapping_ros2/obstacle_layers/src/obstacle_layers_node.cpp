@@ -99,7 +99,7 @@ struct CellReservoir {
 class ObstacleLayersNode final : public rclcpp::Node {
  public:
   ObstacleLayersNode() : Node("obstacle_layers") {
-    input_map_topic_ = declare_parameter<std::string>("input_map_topic", "/elevation_mapping/elevation_map_raw");
+    input_map_topic_ = declare_parameter<std::string>("input_map_topic", "/elevation_map_raw_post");
     output_map_topic_ = declare_parameter<std::string>("output_map_topic", "/elevation_mapping/elevation_map_obstacles");
     input_cloud_topic_ = declare_parameter<std::string>("input_pointcloud_topic", std::string());
 
@@ -128,6 +128,23 @@ class ObstacleLayersNode final : public rclcpp::Node {
 
     alpha_ = static_cast<float>(declare_parameter<double>("alpha", 0.85));
 
+    // Staleness: cells not observed by the sensor in the last stale_reset_dt_s seconds
+    // have their persist_evidence_ chain broken (prev forced to 0). This is a fallback
+    // for cases where elevation_mapping visibility_cleanup hasn't cleared the elevation
+    // layer yet (e.g. sensor facing away from old obstacle position).
+    // Uses the dynamic_time layer published by elevation_mapping (bit-cast uint32 seconds).
+    // Set to 0.0 to disable.
+    stale_reset_dt_s_ = declare_parameter<double>("stale_reset_dt_s", 2.0);
+
+    // Sensor quality / noise robustness
+    // variance_artifact_mult: variance > this * variance_max is a sensor artifact
+    //   (dust cloud on LiDAR, solar glare or sudden light changes on ZED)
+    variance_artifact_mult_ = static_cast<float>(declare_parameter<double>("variance_artifact_mult", 4.0));
+    // spike_persist_warmup: persist_evidence level required before a spike can boost
+    //   confidence. Prevents a single noisy frame from trigging high p_hard.
+    //   With alpha=0.85 a real obstacle reaches 0.30 in ~3 frames.
+    spike_persist_warmup_ = static_cast<float>(declare_parameter<double>("spike_persist_warmup", 0.30));
+
     kh_ = static_cast<float>(declare_parameter<double>("kh", 8.0));
     ks_ = static_cast<float>(declare_parameter<double>("ks", 6.0));
     Th_ = static_cast<float>(declare_parameter<double>("Th", 0.55));
@@ -140,8 +157,11 @@ class ObstacleLayersNode final : public rclcpp::Node {
     hard_marker_threshold_ = static_cast<float>(declare_parameter<double>("hard_marker_threshold", 0.7));
     unknown_marker_threshold_ = static_cast<float>(declare_parameter<double>("unknown_marker_threshold", 0.6));
 
+    // Match the elevation_mapping publisher QoS (RELIABLE)
+    rclcpp::QoS map_sub_qos(rclcpp::KeepLast(5));
+    map_sub_qos.reliable();
     map_sub_ = create_subscription<grid_map_msgs::msg::GridMap>(
-        input_map_topic_, rclcpp::SensorDataQoS(),
+        input_map_topic_, map_sub_qos,
         std::bind(&ObstacleLayersNode::onMap, this, std::placeholders::_1));
 
     map_pub_ = create_publisher<grid_map_msgs::msg::GridMap>(output_map_topic_, rclcpp::SystemDefaultsQoS());
@@ -303,8 +323,9 @@ class ObstacleLayersNode final : public rclcpp::Node {
       supportConf(idx(0), idx(1)) = computeSupportConfidence(out, idx, support_count, max_support_count);
     }
 
-    // 2) edge_score (local discontinuity on support_z)
+    // 2) edge_score (local discontinuity on support_z AND on raw elevation to catch thin obstacles)
     grid_map::Matrix& edgeScore = out[edge_score_layer];
+    const bool hasElev = out.exists(elevation_layer_);
     for (grid_map::GridMapIterator it(out); !it.isPastEnd(); ++it) {
       const grid_map::Index idx(*it);
       const float z0 = supportZ(idx(0), idx(1));
@@ -313,6 +334,7 @@ class ObstacleLayersNode final : public rclcpp::Node {
         continue;
       }
 
+      // Support-z based discontinuity (terrain steps)
       float maxDiff = 0.0f;
       for (int dx = -1; dx <= 1; ++dx) {
         for (int dy = -1; dy <= 1; ++dy) {
@@ -324,7 +346,30 @@ class ObstacleLayersNode final : public rclcpp::Node {
           maxDiff = std::max(maxDiff, std::abs(z0 - zn));
         }
       }
-      edgeScore(idx(0), idx(1)) = clamp01(maxDiff / std::max(1e-6f, step_hard_));
+
+      // Raw elevation spike: this catches thin vertical obstacles (poles, posts)
+      // A cell whose raw elevation is well above its local support IS an obstacle
+      float spikeEdge = 0.0f;
+      if (hasElev && out.isValid(idx, elevation_layer_)) {
+        const float ev = out.at(elevation_layer_, idx);
+        if (finite(ev)) {
+          spikeEdge = std::max(0.0f, ev - z0);  // how much the cell rises above local ground
+          // Also compare raw elevation of this cell against raw elevation of neighbors
+          for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+              if (dx == 0 && dy == 0) continue;
+              grid_map::Index n(idx(0) + dx, idx(1) + dy);
+              if (!out.isValid(n)) continue;
+              if (!out.isValid(n, elevation_layer_)) continue;
+              const float en = out.at(elevation_layer_, n);
+              if (!finite(en)) continue;
+              maxDiff = std::max(maxDiff, std::abs(ev - en));
+            }
+          }
+        }
+      }
+      const float combinedDiff = std::max(maxDiff, spikeEdge);
+      edgeScore(idx(0), idx(1)) = clamp01(combinedDiff / std::max(1e-6f, step_hard_));
     }
 
     // 3) Optional point cloud features (height_rel, vertical_occ)
@@ -398,18 +443,36 @@ class ObstacleLayersNode final : public rclcpp::Node {
     }
 
     if (!has_cloud || cells.empty()) {
-      // If we don't have a cloud aligned, default to 0 (unknown handled later via confidence).
+      // Without a point cloud use the map elevation layer directly.
+      // height_rel = max(0, elevation - support_z) captures thin vertical obstacles
+      // (poles, posts) that appear as elevation spikes above the local support surface.
       for (grid_map::GridMapIterator it(out); !it.isPastEnd(); ++it) {
         const grid_map::Index idx(*it);
-        if (!finite(supportZ(idx(0), idx(1)))) {
+        const float sz = supportZ(idx(0), idx(1));
+        if (!finite(sz)) {
           heightRel(idx(0), idx(1)) = std::numeric_limits<float>::quiet_NaN();
           verticalOcc(idx(0), idx(1)) = std::numeric_limits<float>::quiet_NaN();
           continue;
         }
-        heightRel(idx(0), idx(1)) = 0.0f;
         verticalOcc(idx(0), idx(1)) = 0.0f;
+        // Derive relative height from the map elevation
+        if (out.exists(elevation_layer_) && out.isValid(idx, elevation_layer_)) {
+          const float ev = out.at(elevation_layer_, idx);
+          heightRel(idx(0), idx(1)) = finite(ev) ? std::max(0.0f, ev - sz) : 0.0f;
+        } else {
+          heightRel(idx(0), idx(1)) = 0.0f;
+        }
       }
     }
+
+    // Staleness detection setup: use dynamic_time layer (bit-casted uint32 UNIX seconds)
+    // published by elevation_mapping on each point cloud update.
+    const std::string dyn_time_layer = "dynamic_time";
+    const bool hasDynTime = (stale_reset_dt_s_ > 0.0) && out.exists(dyn_time_layer);
+    const uint64_t now_sec = hasDynTime
+        ? static_cast<uint64_t>(get_clock()->now().seconds())
+        : 0u;
+    const uint64_t stale_threshold_sec = static_cast<uint64_t>(stale_reset_dt_s_);
 
     // 4) Probabilities + obs_cost with persistence
     grid_map::Matrix& persist = out[persist_layer];
@@ -477,12 +540,66 @@ class ObstacleLayersNode final : public rclcpp::Node {
       const float h_soft_n = clamp01(hrel / std::max(1e-6f, h_soft_));
       const float h_hard_n = clamp01(hrel / std::max(1e-6f, h_hard_));
 
-      const float g_hard = std::max({step_n, edge, clear_penalty, neg_n, h_hard_n});
+      // --- SENSOR QUALITY ASSESSMENT ---
+      // Compute a per-cell sensor quality factor in [0.2, 1.0].
+      // Three tiers:
+      //   variance <= variance_max                 → quality 1.0  (nominal)
+      //   variance_max < v <= mult * variance_max  → quality 1.0→0.2 (linearly degraded)
+      //   variance > mult * variance_max           → quality 0.2  (sensor artifact:
+      //     dense dust cloud blocking LiDAR, sudden illumination change on ZED, etc.)
+      float sensor_quality = 1.0f;
+      if (out.exists(variance_layer_) && out.isValid(idx, variance_layer_)) {
+        const float v = out.at(variance_layer_, idx);
+        if (finite(v) && v > variance_max_) {
+          const float artifact_threshold = variance_max_ * variance_artifact_mult_;
+          const float excess = (v - variance_max_) / std::max(1e-6f, artifact_threshold - variance_max_);
+          sensor_quality = std::max(0.2f, 1.0f - 0.8f * clamp01(excess));
+        }
+      }
+
+      // Direct elevation spike: the raw elevation of this cell above its local support.
+      // This is the primary signal for thin vertical obstacles (poles, fence posts, people)
+      // that appear as point spikes in the elevation map.
+      float elev_spike_n = 0.0f;
+      if (out.exists(elevation_layer_) && out.isValid(idx, elevation_layer_)) {
+        const float ev = out.at(elevation_layer_, idx);
+        if (finite(ev) && finite(sz)) {
+          elev_spike_n = clamp01(std::max(0.0f, ev - sz) / std::max(1e-6f, h_hard_));
+        }
+      }
+
+      // Apply sensor quality to spike: a spike caused by dust/glare is attenuated.
+      // Geometrically computed features (step, slope, edge) are less affected because
+      // they rely on relative differences between cells rather than absolute returns.
+      const float elev_spike_eff = elev_spike_n * sensor_quality;
+
+      const float g_hard = std::max({step_n, edge, clear_penalty, neg_n, h_hard_n, elev_spike_eff});
       const float g_soft = 0.35f * slope_n + 0.35f * rough_n + 0.20f * h_soft_n + 0.10f * vocc;
 
+      // Persistence update — scale new evidence by sensor quality.
+      // When the sensor is degraded (dust, glare), new bad readings contribute less
+      // to building history. When the sensor recovers, the false history decays at
+      // rate (1 - alpha) per frame (with alpha=0.85, half-life ≈ 4 frames).
       const float inst = std::max(g_hard, g_soft);
-      const float prev = persistState(idx(0), idx(1));
-      const float pe = alpha_ * prev + (1.0f - alpha_) * inst;
+      const float inst_gated = inst * sensor_quality;
+      float prev = persistState(idx(0), idx(1));
+
+      // Staleness check: if the sensor has not observed this cell in stale_reset_dt_s seconds,
+      // break the EMA history chain. This prevents phantom walls from persisting when an object
+      // moves away and visibility_cleanup hasn't yet cleared the elevation layer.
+      // The cell will transition to unknown (p_hard=0, p_unknown=1) until re-observed.
+      if (hasDynTime && out.isValid(idx, dyn_time_layer)) {
+        const float dyn_t_val = out.at(dyn_time_layer, idx);
+        uint32_t stored_bits;
+        memcpy(&stored_bits, &dyn_t_val, sizeof(uint32_t));
+        const uint64_t stored_sec = static_cast<uint64_t>(stored_bits);
+        if (stored_bits != 0u && now_sec > stored_sec + stale_threshold_sec) {
+          prev = 0.0f;
+          persistState(idx(0), idx(1)) = 0.0f;
+        }
+      }
+
+      const float pe = alpha_ * prev + (1.0f - alpha_) * inst_gated;
       persistState(idx(0), idx(1)) = pe;
       persist(idx(0), idx(1)) = pe;
 
@@ -497,7 +614,19 @@ class ObstacleLayersNode final : public rclcpp::Node {
       missing += hasClear ? 0 : 1;
       if (missing >= 3) conf *= 0.7f;
 
-      const float ph = conf * sigmoid(kh_ * (g_hard - Th_));
+      // Persistence-gated spike confidence:
+      // The spike can only boost confidence once persistent evidence has built up
+      // (spike_persist_warmup, default 0.30). This is the key anti-noise gate:
+      //
+      //   1-frame dust/glare spike:  pe ~ 0.03×quality  →  gate ~ 0  →  no boost.
+      //   Real pole after 3 frames:  pe ~ 0.38            →  gate ~ 1  →  full boost.
+      //
+      // With alpha=0.85 and inst_gated≈1.0, pe crosses 0.30 after ~3 frames (~0.3s at 10Hz).
+      // For a real obstacle this delay is negligible; for sensor transients it's decisive.
+      const float spike_persist_gate = clamp01(pe / std::max(1e-6f, spike_persist_warmup_));
+      const float conf_adj = std::max(conf, elev_spike_eff * 0.85f * spike_persist_gate);
+
+      const float ph = std::min(1.0f, conf_adj * sigmoid(kh_ * (g_hard - Th_)));
       const float ps = conf * (1.0f - ph) * sigmoid(ks_ * (g_soft - Ts_));
       const float pu = 1.0f - conf;
 
@@ -609,6 +738,11 @@ class ObstacleLayersNode final : public rclcpp::Node {
   float h_body_{0.45f};
 
   float alpha_{0.85f};
+  double stale_reset_dt_s_{2.0};
+
+  // Sensor quality / noise robustness
+  float variance_artifact_mult_{4.0f};
+  float spike_persist_warmup_{0.30f};
 
   float kh_{8.0f};
   float ks_{6.0f};

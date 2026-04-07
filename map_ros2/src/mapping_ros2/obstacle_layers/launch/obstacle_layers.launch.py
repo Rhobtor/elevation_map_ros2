@@ -13,7 +13,7 @@ def generate_launch_description():
                 parameters=[
                     {
                         # Topics
-                        "input_map_topic": "/elevation_mapping/elevation_map_raw",
+                        "input_map_topic": "/elevation_map_raw_post",
                         "output_map_topic": "/elevation_mapping/elevation_map_obstacles",
                         "input_pointcloud_topic": "",  # set to e.g. "/points_fused" if available
 
@@ -43,8 +43,35 @@ def generate_launch_description():
                         "h_climb": 0.10,
                         "h_body": 0.45,
 
-                        # Temporal
-                        "alpha": 0.85,
+                        # Temporal: alpha controla la "memoria" del mapa de obstáculos.
+                        # EMA: pe(t) = alpha*pe(t-1) + (1-alpha)*inst
+                        #
+                        # El problema con objetos MÓVILES:
+                        # Con alpha=0.85 (anterior), cuando el objeto se va, la celda
+                        # tarda ~20 frames (2s a 10Hz) en limpiar pe hasta <0.05.
+                        # Un objeto que pasa a 1 m/s y celdas de 0.4m ocupa cada celda
+                        # ~0.4s = ~4 frames → la celda no da tiempo a limpiarse antes
+                        # de que el objeto avance → se crea un "rastro de muro fantasma".
+                        #
+                        # Con alpha=0.55:
+                        #   - Tiempo hasta pe<0.05 desde pe=1.0: ~5 frames (0.5s) ✓
+                        #   - Obstáculos FIJOS: llegan a pe≈0.45 en 3 frames y se mantienen ✓
+                        #   - Tradeoff: el mapa "parpadea" ligeramente más, pero no deja rastro.
+                        #
+                        # Para objetos lentos (<0.3 m/s) o escenas totalmente estáticas,
+                        # se puede subir alpha de vuelta a 0.75-0.85.
+                        "alpha": 0.55,
+
+                        # Sensor noise robustness
+                        # variance_artifact_mult: variance > this × variance_max is treated
+                        #   as a sensor artifact (LiDAR dust, ZED light change).
+                        #   At 4×: quality 1.0→0.2 linearly, so a sudden glare spike barely
+                        #   registers in persist_evidence.
+                        "variance_artifact_mult": 4.0,
+                        # spike_persist_warmup: persist_evidence level before a spike can
+                        #   boost confidence. With alpha=0.85 a real object reaches 0.30
+                        #   in ~3 frames (~0.3 s at 10 Hz). A 1-frame glint stays at 0.03.
+                        "spike_persist_warmup": 0.30,
 
                         # Probability & cost
                         "kh": 8.0,

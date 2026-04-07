@@ -21,7 +21,12 @@ elevation_mapping:
     multi_height_noise: 0.01
     fused_map_publishing_rate: 20.0
     enable_skip_lower_points: false
-    enable_visibility_cleanup: false
+    # Visibility cleanup: ray-traces every scan and sets elevation=NaN for cells
+    # that are "floating above" the current free line-of-sight from the sensor.
+    # This is the primary mechanism to erase moving-object ghost trails: once the
+    # object moves away, the next scan sees free rays through the old elevated cells
+    # and clears them, propagating NaN to obstacle_layers → persist_evidence_ resets.
+    enable_visibility_cleanup: true
     scanning_duration: 0.01
     remove_penetrated_points_rate: 5.0
     visibility_cleanup_rate: 10.0
