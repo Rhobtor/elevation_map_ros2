@@ -43,6 +43,7 @@
 #include "elevation_mapping/input_sources/InputSourceManager.hpp"
 #include "elevation_mapping/sensor_processors/SensorProcessorBase.hpp"
 #include <exception>
+#include <optional>
 namespace elevation_mapping {
 
 enum class InitializationMethods { PlanarFloorInitializer };
@@ -112,12 +113,54 @@ class ElevationMapping {
     double neg_drop_thresh_m   = 0.20;
     double neg_ring_m          = 0.30;
   };
+    struct ObstacleLayerConfig {
+      bool enabled = true;
+      int compute_every_n = 2;
+      std::string elevation_layer = "elevation";
+      std::string variance_layer = "variance";
+      std::string slope_layer = "slope";
+      std::string step_layer = "step";
+      std::string rough_layer = "rough";
+      std::string clearance_layer = "clearance";
+      std::string negatives_layer = "negatives";
+      std::string obs_layer = "obs_cost";
+      std::string hard_layer = "p_hard";
+      std::string soft_layer = "p_soft";
+      std::string unknown_layer = "p_unknown";
+      double support_window_m = 0.45;
+      float support_percentile = 0.20f;
+      float variance_min = 0.01f;
+      float variance_max = 0.05f;
+      float step_hard = 0.25f;
+      float rough_hard = 0.10f;
+      float slope_hard = 0.52f;
+      float neg_hard = 0.25f;
+      float h_soft = 0.10f;
+      float h_hard = 0.25f;
+      float clear_min = 0.40f;
+      float alpha = 0.85f;
+      double stale_reset_dt_s = 2.0;
+      float variance_artifact_mult = 4.0f;
+      float spike_persist_warmup = 0.30f;
+      float kh = 8.0f;
+      float ks = 6.0f;
+      float Th = 0.55f;
+      float Ts = 0.45f;
+      float wh = 80.0f;
+      float ws = 15.0f;
+      float wu = 8.0f;
+    };
     LayersEnable enable_;
     RatesConfig  rates_;
+    ObstacleLayerConfig obstacleLayers_;
+    bool enableCapDebug_ = false;
+    bool enableNoGoCap_ = false;
+    bool enableNavgrid_ = false;
 
     int frameCount_ = 0;  // contador de nubes procesadas
     LayerConfig layers_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr obstaclesGridPub_;
+    std::optional<grid_map::Matrix> obstaclePersistEvidence_;
 
 
 
@@ -271,6 +314,10 @@ class ElevationMapping {
    * @return true if successful.
    */
   bool initialize();
+
+  void ensureEmbeddedObstacleStorage(const grid_map::GridMap& map);
+
+  void updateEmbeddedObstacleLayers();
 
   /**
    * Sets up the subscribers for both robot poses and input data.

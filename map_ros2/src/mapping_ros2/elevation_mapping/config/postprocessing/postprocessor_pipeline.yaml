@@ -1,5 +1,8 @@
 elevation_mapping:
   ros__parameters:
+    fused_output_topic: ""
+    output_topic: elevation_map
+    output_layers: [elevation, step, slope, rough, p_unknown]
   
     postprocessor_pipeline: # set by postprocessor_pipeline_name
       # Fill holes in the map with inpainting.
@@ -10,16 +13,6 @@ elevation_mapping:
           input_layer: elevation
           output_layer: elevation_inpainted
           radius: 0.05
-
-      # Compute Surface normals
-      filter2:
-        name: surface_normals
-        type: gridMapFilters/NormalVectorsFilter
-        params:
-          input_layer: elevation_inpainted
-          output_layers_prefix: normal_vectors_
-          radius: 0.1
-          normal_vector_positive_axis: z
 
       #  Delete layers that are not needed to reduce bandwidth
       # filter3:

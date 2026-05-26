@@ -1,7 +1,22 @@
 elevation_mapping:
   ros__parameters:
+    postprocessor_num_threads: 1
     min_update_rate: 5.0
     time_tolerance: 0.5
+    obstacle_layers.compute_every_n: 2
+    layers_enable.slope: true
+    layers_enable.rough: true
+    layers_enable.step: true
+    layers_enable.obstacles_binary: false
+    layers_enable.negative: false
+    layers_enable.cvar: false
+    layers_enable.grid: false
+    layers_enable.frontier: false
+    layers_enable.multi_cost: false
+    layers_enable.no_go: false
+    layers_enable.frontier_filter: false
+    features.enable_no_go_cap: false
+    features.enable_navgrid: false
     sensor_processor/ignore_points_above: 2.0
     robot_motion_map_update/covariance_scale_translation_x: 0.0
     robot_motion_map_update/covariance_scale_translation_y: 0.0
@@ -10,8 +25,8 @@ elevation_mapping:
     robot_motion_map_update/covariance_scale_rotation_y: 0.0
     robot_motion_map_update/covariance_scale_rotation_z: 0.0
 
-    length_in_x: 40.0
-    length_in_y: 40.0
+    length_in_x: 21.0
+    length_in_y: 21.0
     position_x: 0.0
     position_y: 0.0
     resolution: 0.15
@@ -19,7 +34,7 @@ elevation_mapping:
     max_variance: 0.05
     mahalanobis_distance_threshold: 3.5
     multi_height_noise: 0.01
-    fused_map_publishing_rate: 20.0
+    fused_map_publishing_rate: 10.0
     enable_skip_lower_points: false
     # Visibility cleanup: ray-traces every scan and sets elevation=NaN for cells
     # that are "floating above" the current free line-of-sight from the sensor.
@@ -29,4 +44,4 @@ elevation_mapping:
     enable_visibility_cleanup: true
     scanning_duration: 0.01
     remove_penetrated_points_rate: 5.0
-    visibility_cleanup_rate: 10.0
+    visibility_cleanup_rate: 4.0

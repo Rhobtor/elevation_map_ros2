@@ -3,8 +3,8 @@
     inputs: ['ground_truth_cloud', 'camera_cloud']
     ground_truth_cloud: # A name to identify the input source
       type: pointcloud # Supported types: pointcloud
-      topic: /velodyne_points_filtered
-      queue_size: 10
+      topic: /velodyne_points
+      queue_size: 1
       publish_on_update: true # Whether to publish the elevation map after a callback from this source.
       sensor_processor:
         type: perfect
@@ -12,8 +12,8 @@
     camera_cloud: # A name to identify the input source
       type: pointcloud # Supported types: pointcloud
       topic: /merged_points_filtered
-      queue_size: 10
-      publish_on_update: true # Whether to publish the elevation map after a callback from this source.
+      queue_size: 1
+      publish_on_update: false # Update the raw map, but avoid a second publish/fusion pass when camera and lidar arrive almost together.
       sensor_processor:
         type: perfect
 

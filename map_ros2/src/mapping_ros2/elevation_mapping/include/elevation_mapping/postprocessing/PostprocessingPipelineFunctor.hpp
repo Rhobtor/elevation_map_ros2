@@ -76,8 +76,17 @@ class PostprocessingPipelineFunctor {
   //! Name of the output grid map topic.
   std::string outputTopic_;
 
+  //! Optional secondary output topic for the same filtered grid map.
+  std::string secondaryOutputTopic_;
+
+  //! Layers to publish on the output topic. Empty means publish all available layers.
+  std::vector<std::string> outputLayers_;
+
   //! Grid map publisher.
   rclcpp::Publisher<grid_map_msgs::msg::GridMap>::SharedPtr publisher_;
+
+  //! Optional secondary publisher.
+  rclcpp::Publisher<grid_map_msgs::msg::GridMap>::SharedPtr secondaryPublisher_;
 
   //! Filter chain.
   filters::FilterChain<grid_map::GridMap> filterChain_;

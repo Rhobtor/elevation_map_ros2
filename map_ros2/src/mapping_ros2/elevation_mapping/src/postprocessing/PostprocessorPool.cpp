@@ -14,7 +14,14 @@ PostprocessorPool::PostprocessorPool(std::size_t poolSize, std::shared_ptr<rclcp
   nodeHandle->declare_parameter("output_topic", std::string("elevation_map_raw_post"));
   nodeHandle->declare_parameter("postprocessor_pipeline_name", rclcpp::ParameterValue(std::string("postprocessor_pipeline")));
 
-  for (std::size_t i = 0; i < poolSize; ++i) {
+  const std::size_t effectivePoolSize = std::max<std::size_t>(1, std::min<std::size_t>(poolSize, 1));
+  if (poolSize > effectivePoolSize) {
+    RCLCPP_WARN(nodeHandle->get_logger(),
+                "postprocessor_num_threads=%zu is not supported with the current shared filter-chain node; using %zu worker.",
+                poolSize, effectivePoolSize);
+  }
+
+  for (std::size_t i = 0; i < effectivePoolSize; ++i) {
     // Add worker to the collection.
     workers_.emplace_back(std::make_unique<PostprocessingWorker>(nodeHandle));
     // Create one service per thread

@@ -328,6 +328,7 @@ class ElevationMap {
   bool enableContinuousCleanup_;
   double visibilityCleanupDuration_;
   double scanningDuration_;
+  std::string fusedMapTopic_;
 };
 
 }  // namespace elevation_mapping

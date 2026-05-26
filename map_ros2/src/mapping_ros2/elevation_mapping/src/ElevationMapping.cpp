@@ -7,7 +7,9 @@
 #include <sstream>
 #include <exception>
 #include <chrono>
+#include <cstring>
 #include <limits>
+#include <vector>
 
 #include <grid_map_msgs/msg/grid_map.h>
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -39,6 +41,34 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 namespace elevation_mapping {
+
+namespace {
+
+float clamp01(const float value) {
+  if (value < 0.0f) {
+    return 0.0f;
+  }
+  if (value > 1.0f) {
+    return 1.0f;
+  }
+  return value;
+}
+
+float sigmoid(const float x) {
+  if (x >= 20.0f) {
+    return 1.0f;
+  }
+  if (x <= -20.0f) {
+    return 0.0f;
+  }
+  return 1.0f / (1.0f + std::exp(-x));
+}
+
+bool finite(const float value) {
+  return std::isfinite(value);
+}
+
+}  // namespace
 
 ElevationMapping::ElevationMapping(std::shared_ptr<rclcpp::Node>& nodeHandle) :
       nodeHandle_(nodeHandle),
@@ -90,11 +120,12 @@ ElevationMapping::ElevationMapping(std::shared_ptr<rclcpp::Node>& nodeHandle) :
 void ElevationMapping::setupSubscribers() {  // Handle deprecated point_cloud_topic and input_sources configuration.
   auto res = nodeHandle_->get_topic_names_and_types();
   for (auto a:res){
-    RCLCPP_INFO(nodeHandle_->get_logger(), "topic: %s", a.first.c_str());
+    RCLCPP_DEBUG(nodeHandle_->get_logger(), "topic: %s", a.first.c_str());
   }
 
   const bool configuredInputSources = inputSources_.configureFromRos("input_sources");
-  const bool hasDeprecatedPointcloudTopic = nodeHandle_->get_parameter("point_cloud_topic", pointCloudTopic_);
+  const bool hasDeprecatedPointcloudTopic =
+      nodeHandle_->get_parameter("point_cloud_topic", pointCloudTopic_) && !pointCloudTopic_.empty();
   if (hasDeprecatedPointcloudTopic) {
     RCLCPP_WARN(nodeHandle_->get_logger(), "Parameter 'point_cloud_topic' is deprecated, please use 'input_sources' instead.");
   }
@@ -302,6 +333,9 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->declare_parameter("layers_enable.no_go",           true);
   nodeHandle_->declare_parameter("layers_enable.frontier_filter", true);
   nodeHandle_->declare_parameter("layers_enable.occupancy_like",  true);
+  nodeHandle_->declare_parameter("debug.enable_cap_debug",        false);
+  nodeHandle_->declare_parameter("features.enable_no_go_cap",     false);
+  nodeHandle_->declare_parameter("features.enable_navgrid",       false);
 
   nodeHandle_->get_parameter("layers_enable.grid",            enable_.grid);
   nodeHandle_->get_parameter("layers_enable.frontier",        enable_.frontier);
@@ -309,6 +343,104 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->get_parameter("layers_enable.no_go",           enable_.no_go);
   nodeHandle_->get_parameter("layers_enable.frontier_filter", enable_.frontier_filter);
   nodeHandle_->get_parameter("layers_enable.occupancy_like",  enable_.occupancy_like);
+  nodeHandle_->get_parameter("debug.enable_cap_debug",        enableCapDebug_);
+  nodeHandle_->get_parameter("features.enable_no_go_cap",     enableNoGoCap_);
+  nodeHandle_->get_parameter("features.enable_navgrid",       enableNavgrid_);
+
+  nodeHandle_->declare_parameter("obstacle_layers.enable", obstacleLayers_.enabled);
+  nodeHandle_->declare_parameter("obstacle_layers.compute_every_n", obstacleLayers_.compute_every_n);
+  nodeHandle_->declare_parameter("obstacle_layers.elevation_layer", obstacleLayers_.elevation_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.variance_layer", obstacleLayers_.variance_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.slope_layer", obstacleLayers_.slope_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.step_layer", obstacleLayers_.step_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.rough_layer", obstacleLayers_.rough_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.clearance_layer", obstacleLayers_.clearance_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.negatives_layer", obstacleLayers_.negatives_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.obs_layer", obstacleLayers_.obs_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.hard_layer", obstacleLayers_.hard_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.soft_layer", obstacleLayers_.soft_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.unknown_layer", obstacleLayers_.unknown_layer);
+  nodeHandle_->declare_parameter("obstacle_layers.support_window_m", obstacleLayers_.support_window_m);
+  nodeHandle_->declare_parameter("obstacle_layers.support_percentile", static_cast<double>(obstacleLayers_.support_percentile));
+  nodeHandle_->declare_parameter("obstacle_layers.variance_min", static_cast<double>(obstacleLayers_.variance_min));
+  nodeHandle_->declare_parameter("obstacle_layers.variance_max", static_cast<double>(obstacleLayers_.variance_max));
+  nodeHandle_->declare_parameter("obstacle_layers.step_hard", static_cast<double>(obstacleLayers_.step_hard));
+  nodeHandle_->declare_parameter("obstacle_layers.rough_hard", static_cast<double>(obstacleLayers_.rough_hard));
+  nodeHandle_->declare_parameter("obstacle_layers.slope_hard", static_cast<double>(obstacleLayers_.slope_hard));
+  nodeHandle_->declare_parameter("obstacle_layers.neg_hard", static_cast<double>(obstacleLayers_.neg_hard));
+  nodeHandle_->declare_parameter("obstacle_layers.h_soft", static_cast<double>(obstacleLayers_.h_soft));
+  nodeHandle_->declare_parameter("obstacle_layers.h_hard", static_cast<double>(obstacleLayers_.h_hard));
+  nodeHandle_->declare_parameter("obstacle_layers.clear_min", static_cast<double>(obstacleLayers_.clear_min));
+  nodeHandle_->declare_parameter("obstacle_layers.alpha", static_cast<double>(obstacleLayers_.alpha));
+  nodeHandle_->declare_parameter("obstacle_layers.stale_reset_dt_s", obstacleLayers_.stale_reset_dt_s);
+  nodeHandle_->declare_parameter("obstacle_layers.variance_artifact_mult", static_cast<double>(obstacleLayers_.variance_artifact_mult));
+  nodeHandle_->declare_parameter("obstacle_layers.spike_persist_warmup", static_cast<double>(obstacleLayers_.spike_persist_warmup));
+  nodeHandle_->declare_parameter("obstacle_layers.kh", static_cast<double>(obstacleLayers_.kh));
+  nodeHandle_->declare_parameter("obstacle_layers.ks", static_cast<double>(obstacleLayers_.ks));
+  nodeHandle_->declare_parameter("obstacle_layers.Th", static_cast<double>(obstacleLayers_.Th));
+  nodeHandle_->declare_parameter("obstacle_layers.Ts", static_cast<double>(obstacleLayers_.Ts));
+  nodeHandle_->declare_parameter("obstacle_layers.wh", static_cast<double>(obstacleLayers_.wh));
+  nodeHandle_->declare_parameter("obstacle_layers.ws", static_cast<double>(obstacleLayers_.ws));
+  nodeHandle_->declare_parameter("obstacle_layers.wu", static_cast<double>(obstacleLayers_.wu));
+
+  nodeHandle_->get_parameter("obstacle_layers.enable", obstacleLayers_.enabled);
+  nodeHandle_->get_parameter("obstacle_layers.compute_every_n", obstacleLayers_.compute_every_n);
+  nodeHandle_->get_parameter("obstacle_layers.elevation_layer", obstacleLayers_.elevation_layer);
+  nodeHandle_->get_parameter("obstacle_layers.variance_layer", obstacleLayers_.variance_layer);
+  nodeHandle_->get_parameter("obstacle_layers.slope_layer", obstacleLayers_.slope_layer);
+  nodeHandle_->get_parameter("obstacle_layers.step_layer", obstacleLayers_.step_layer);
+  nodeHandle_->get_parameter("obstacle_layers.rough_layer", obstacleLayers_.rough_layer);
+  nodeHandle_->get_parameter("obstacle_layers.clearance_layer", obstacleLayers_.clearance_layer);
+  nodeHandle_->get_parameter("obstacle_layers.negatives_layer", obstacleLayers_.negatives_layer);
+  nodeHandle_->get_parameter("obstacle_layers.obs_layer", obstacleLayers_.obs_layer);
+  nodeHandle_->get_parameter("obstacle_layers.hard_layer", obstacleLayers_.hard_layer);
+  nodeHandle_->get_parameter("obstacle_layers.soft_layer", obstacleLayers_.soft_layer);
+  nodeHandle_->get_parameter("obstacle_layers.unknown_layer", obstacleLayers_.unknown_layer);
+  nodeHandle_->get_parameter("obstacle_layers.support_window_m", obstacleLayers_.support_window_m);
+  {
+    double value = 0.0;
+    nodeHandle_->get_parameter("obstacle_layers.support_percentile", value);
+    obstacleLayers_.support_percentile = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.variance_min", value);
+    obstacleLayers_.variance_min = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.variance_max", value);
+    obstacleLayers_.variance_max = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.step_hard", value);
+    obstacleLayers_.step_hard = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.rough_hard", value);
+    obstacleLayers_.rough_hard = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.slope_hard", value);
+    obstacleLayers_.slope_hard = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.neg_hard", value);
+    obstacleLayers_.neg_hard = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.h_soft", value);
+    obstacleLayers_.h_soft = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.h_hard", value);
+    obstacleLayers_.h_hard = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.clear_min", value);
+    obstacleLayers_.clear_min = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.alpha", value);
+    obstacleLayers_.alpha = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.variance_artifact_mult", value);
+    obstacleLayers_.variance_artifact_mult = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.spike_persist_warmup", value);
+    obstacleLayers_.spike_persist_warmup = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.kh", value);
+    obstacleLayers_.kh = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.ks", value);
+    obstacleLayers_.ks = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.Th", value);
+    obstacleLayers_.Th = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.Ts", value);
+    obstacleLayers_.Ts = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.wh", value);
+    obstacleLayers_.wh = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.ws", value);
+    obstacleLayers_.ws = static_cast<float>(value);
+    nodeHandle_->get_parameter("obstacle_layers.wu", value);
+    obstacleLayers_.wu = static_cast<float>(value);
+  }
+  nodeHandle_->get_parameter("obstacle_layers.stale_reset_dt_s", obstacleLayers_.stale_reset_dt_s);
 
   // --- params de capas nuevas ---
   nodeHandle_->declare_parameter("grid.var_thresh",            0.05);   // m^2
@@ -480,6 +612,224 @@ bool ElevationMapping::readParameters() {
   return true;
 }
 
+void ElevationMapping::ensureEmbeddedObstacleStorage(const grid_map::GridMap& map) {
+  const grid_map::Size size = map.getSize();
+  if (!obstaclePersistEvidence_.has_value() ||
+      obstaclePersistEvidence_->rows() != size(0) ||
+      obstaclePersistEvidence_->cols() != size(1)) {
+    obstaclePersistEvidence_.emplace(size(0), size(1));
+    obstaclePersistEvidence_->setZero();
+  }
+}
+
+void ElevationMapping::updateEmbeddedObstacleLayers() {
+  if (!obstacleLayers_.enabled) {
+    return;
+  }
+
+  const int computeEveryN = std::max(1, obstacleLayers_.compute_every_n);
+  if ((frameCount_ % computeEveryN) != 0) {
+    return;
+  }
+
+  auto& gm = map_.getRawGridMap();
+  if (!gm.exists(obstacleLayers_.elevation_layer)) {
+    RCLCPP_WARN_THROTTLE(nodeHandle_->get_logger(), *nodeHandle_->get_clock(), 2000,
+                         "Embedded obstacle layers require '%s'",
+                         obstacleLayers_.elevation_layer.c_str());
+    return;
+  }
+
+  ensureEmbeddedObstacleStorage(gm);
+
+  const auto size = gm.getSize();
+  const int rows = size(0);
+  const int cols = size(1);
+  const auto inBounds = [rows, cols](const grid_map::Index& index) {
+    return index(0) >= 0 && index(1) >= 0 && index(0) < rows && index(1) < cols;
+  };
+
+  for (const auto& layer : {obstacleLayers_.hard_layer, obstacleLayers_.soft_layer,
+                            obstacleLayers_.unknown_layer, obstacleLayers_.obs_layer}) {
+    if (!gm.exists(layer)) {
+      gm.add(layer, std::numeric_limits<float>::quiet_NaN());
+    }
+  }
+  const bool hasVariance = gm.exists(obstacleLayers_.variance_layer);
+  const bool hasStep = gm.exists(obstacleLayers_.step_layer);
+  const bool hasRough = gm.exists(obstacleLayers_.rough_layer);
+  const bool hasSlope = gm.exists(obstacleLayers_.slope_layer);
+  const bool hasNeg = gm.exists(obstacleLayers_.negatives_layer);
+  const bool hasClear = gm.exists(obstacleLayers_.clearance_layer);
+  const bool hasDynamicTime = obstacleLayers_.stale_reset_dt_s > 0.0 && gm.exists("dynamic_time");
+  const uint64_t nowSec = hasDynamicTime ? static_cast<uint64_t>(nodeHandle_->get_clock()->now().seconds()) : 0u;
+  const uint64_t staleThreshold = static_cast<uint64_t>(obstacleLayers_.stale_reset_dt_s);
+  auto& persist = *obstaclePersistEvidence_;
+  auto& pHard = gm[obstacleLayers_.hard_layer];
+  auto& pSoft = gm[obstacleLayers_.soft_layer];
+  auto& pUnknown = gm[obstacleLayers_.unknown_layer];
+  auto& obsCost = gm[obstacleLayers_.obs_layer];
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+
+  for (grid_map::GridMapIterator it(gm); !it.isPastEnd(); ++it) {
+    const grid_map::Index idx(*it);
+    if (!gm.isValid(idx, obstacleLayers_.elevation_layer)) {
+      pHard(idx(0), idx(1)) = nan;
+      pSoft(idx(0), idx(1)) = nan;
+      pUnknown(idx(0), idx(1)) = nan;
+      obsCost(idx(0), idx(1)) = nan;
+      persist(idx(0), idx(1)) = 0.0f;
+      continue;
+    }
+
+    const float elevation = gm.at(obstacleLayers_.elevation_layer, idx);
+    if (!finite(elevation)) {
+      pHard(idx(0), idx(1)) = nan;
+      pSoft(idx(0), idx(1)) = nan;
+      pUnknown(idx(0), idx(1)) = nan;
+      obsCost(idx(0), idx(1)) = nan;
+      persist(idx(0), idx(1)) = 0.0f;
+      continue;
+    }
+
+    float localMin = elevation;
+    float localMaxDiff = 0.0f;
+    int supportCount = 0;
+    for (int dx = -1; dx <= 1; ++dx) {
+      for (int dy = -1; dy <= 1; ++dy) {
+        const grid_map::Index neighbor(idx(0) + dx, idx(1) + dy);
+        if (!inBounds(neighbor) || !gm.isValid(neighbor, obstacleLayers_.elevation_layer)) {
+          continue;
+        }
+        if (hasVariance && gm.isValid(neighbor, obstacleLayers_.variance_layer)) {
+          const float variance = gm.at(obstacleLayers_.variance_layer, neighbor);
+          if (!finite(variance) || variance > obstacleLayers_.variance_max) {
+            continue;
+          }
+        }
+        const float z = gm.at(obstacleLayers_.elevation_layer, neighbor);
+        if (!finite(z)) {
+          continue;
+        }
+        ++supportCount;
+        localMin = std::min(localMin, z);
+        if (!(dx == 0 && dy == 0)) {
+          localMaxDiff = std::max(localMaxDiff, std::abs(elevation - z));
+        }
+      }
+    }
+
+    const float support = localMin;
+    const float heightRel = std::max(0.0f, elevation - support);
+    float sigmaTerm = 0.5f;
+    if (hasVariance && gm.isValid(idx, obstacleLayers_.variance_layer)) {
+      const float variance = gm.at(obstacleLayers_.variance_layer, idx);
+      if (finite(variance)) {
+        const float norm = clamp01((variance - obstacleLayers_.variance_min) /
+                                   std::max(1e-6f, obstacleLayers_.variance_max - obstacleLayers_.variance_min));
+        sigmaTerm = 1.0f - norm;
+      }
+    }
+    const float countTerm = clamp01(static_cast<float>(supportCount) /
+                                    9.0f);
+    const float confSupport = clamp01(0.7f * sigmaTerm + 0.3f * countTerm);
+
+    float stepNorm = 0.0f;
+    float roughNorm = 0.0f;
+    float slopeNorm = 0.0f;
+    float negNorm = 0.0f;
+    float clearPenalty = 0.0f;
+    if (hasStep && gm.isValid(idx, obstacleLayers_.step_layer)) {
+      const float value = gm.at(obstacleLayers_.step_layer, idx);
+      if (finite(value)) {
+        stepNorm = clamp01(value / std::max(1e-6f, obstacleLayers_.step_hard));
+      }
+    }
+    if (hasRough && gm.isValid(idx, obstacleLayers_.rough_layer)) {
+      const float value = gm.at(obstacleLayers_.rough_layer, idx);
+      if (finite(value)) {
+        roughNorm = clamp01(value / std::max(1e-6f, obstacleLayers_.rough_hard));
+      }
+    }
+    if (hasSlope && gm.isValid(idx, obstacleLayers_.slope_layer)) {
+      const float value = gm.at(obstacleLayers_.slope_layer, idx);
+      if (finite(value)) {
+        slopeNorm = clamp01(value / std::max(1e-6f, obstacleLayers_.slope_hard));
+      }
+    }
+    if (hasNeg && gm.isValid(idx, obstacleLayers_.negatives_layer)) {
+      const float value = gm.at(obstacleLayers_.negatives_layer, idx);
+      if (finite(value)) {
+        negNorm = clamp01(value / std::max(1e-6f, obstacleLayers_.neg_hard));
+      }
+    }
+    if (hasClear && gm.isValid(idx, obstacleLayers_.clearance_layer)) {
+      const float value = gm.at(obstacleLayers_.clearance_layer, idx);
+      if (finite(value)) {
+        clearPenalty = clamp01((obstacleLayers_.clear_min - value) /
+                               std::max(1e-6f, obstacleLayers_.clear_min));
+      }
+    }
+
+    float sensorQuality = 1.0f;
+    if (hasVariance && gm.isValid(idx, obstacleLayers_.variance_layer)) {
+      const float variance = gm.at(obstacleLayers_.variance_layer, idx);
+      if (finite(variance) && variance > obstacleLayers_.variance_max) {
+        const float artifactThreshold = obstacleLayers_.variance_max * obstacleLayers_.variance_artifact_mult;
+        const float excess = (variance - obstacleLayers_.variance_max) /
+                             std::max(1e-6f, artifactThreshold - obstacleLayers_.variance_max);
+        sensorQuality = std::max(0.2f, 1.0f - 0.8f * clamp01(excess));
+      }
+    }
+
+    const float edge = clamp01(std::max(localMaxDiff, heightRel) /
+                               std::max(1e-6f, obstacleLayers_.step_hard));
+    const float hSoftNorm = clamp01(heightRel / std::max(1e-6f, obstacleLayers_.h_soft));
+    const float hHardNorm = clamp01(heightRel / std::max(1e-6f, obstacleLayers_.h_hard));
+    const float elevSpike = hHardNorm;
+    const float elevSpikeEff = elevSpike * sensorQuality;
+    const float gHard = std::max({stepNorm, edge, clearPenalty, negNorm, hHardNorm, elevSpikeEff});
+    const float gSoft = 0.35f * slopeNorm + 0.35f * roughNorm + 0.20f * hSoftNorm;
+    const float instGated = std::max(gHard, gSoft) * sensorQuality;
+
+    float prev = persist(idx(0), idx(1));
+    if (hasDynamicTime && gm.isValid(idx, "dynamic_time")) {
+      const float dynTime = gm.at("dynamic_time", idx);
+      uint32_t bits = 0u;
+      std::memcpy(&bits, &dynTime, sizeof(uint32_t));
+      if (bits != 0u && nowSec > static_cast<uint64_t>(bits) + staleThreshold) {
+        prev = 0.0f;
+        persist(idx(0), idx(1)) = 0.0f;
+      }
+    }
+
+    const float pe = obstacleLayers_.alpha * prev + (1.0f - obstacleLayers_.alpha) * instGated;
+    persist(idx(0), idx(1)) = pe;
+
+    float conf = clamp01(0.8f * confSupport + 0.2f * pe);
+    int missing = 0;
+    missing += hasStep ? 0 : 1;
+    missing += hasRough ? 0 : 1;
+    missing += hasSlope ? 0 : 1;
+    missing += hasNeg ? 0 : 1;
+    missing += hasClear ? 0 : 1;
+    if (missing >= 3) {
+      conf *= 0.7f;
+    }
+
+    const float spikeGate = clamp01(pe / std::max(1e-6f, obstacleLayers_.spike_persist_warmup));
+    const float confAdjusted = std::max(conf, elevSpikeEff * 0.85f * spikeGate);
+    const float ph = std::min(1.0f, confAdjusted * sigmoid(obstacleLayers_.kh * (gHard - obstacleLayers_.Th)));
+    const float ps = conf * (1.0f - ph) * sigmoid(obstacleLayers_.ks * (gSoft - obstacleLayers_.Ts));
+    const float pu = 1.0f - conf;
+
+    pHard(idx(0), idx(1)) = ph;
+    pSoft(idx(0), idx(1)) = ps;
+    pUnknown(idx(0), idx(1)) = pu;
+    obsCost(idx(0), idx(1)) = obstacleLayers_.wh * (ph * ph) + obstacleLayers_.ws * ps + obstacleLayers_.wu * pu;
+  }
+}
+
 bool ElevationMapping::initialize() {
   RCLCPP_INFO(nodeHandle_->get_logger(), "Elevation mapping node initializing ... ");
 
@@ -516,7 +866,7 @@ bool ElevationMapping::initialize() {
 void ElevationMapping::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSharedPtr pointCloudMsg,
                                           bool publishPointCloud,
                                           const SensorProcessorBase::Ptr& sensorProcessor_) {
-  RCLCPP_INFO(nodeHandle_->get_logger(), "Processing data from: %s", pointCloudMsg->header.frame_id.c_str());
+  RCLCPP_DEBUG(nodeHandle_->get_logger(), "Processing data from: %s", pointCloudMsg->header.frame_id.c_str());
   if (!updatesEnabled_) {
     auto clock = nodeHandle_->get_clock();
     RCLCPP_WARN_THROTTLE(nodeHandle_->get_logger(), *(clock), 10, "Updating of elevation map is disabled. (Warning message is throttled, 10s.)");
@@ -576,7 +926,6 @@ void ElevationMapping::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSh
   }
 
   // Process point cloud.
-  RCLCPP_INFO_STREAM(nodeHandle_->get_logger(), "Variance is:" << robotPoseCovariance);
   PointCloudType::Ptr pointCloudProcessed(new PointCloudType);
   Eigen::VectorXf measurementVariances;
   if (!sensorProcessor_->process(pointCloud, robotPoseCovariance, pointCloudProcessed, measurementVariances,
@@ -591,34 +940,8 @@ void ElevationMapping::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSh
     return;
   }
 
-  // === Log robusto de variancias ===
   if (measurementVariances.size() == 0) {
-    RCLCPP_INFO(nodeHandle_->get_logger(), "Variance vector is empty.");
-  } else {
-    const size_t N = measurementVariances.size();
-    std::array<size_t, 5> picks{0, N/4, N/2, (3*N)/4, N-1};
-    std::ostringstream os;
-    os << "Variance samples (" << N << "): ";
-    for (size_t k = 0; k < picks.size(); ++k) {
-      size_t idx = std::min(picks[k], N-1);
-      os << measurementVariances[idx];
-      if (k + 1 < picks.size()) os << " , ";
-    }
-    RCLCPP_INFO(nodeHandle_->get_logger(), "%s", os.str().c_str());
-  }
-
-  if (measurementVariances.size() >= 121) {
-    RCLCPP_INFO(nodeHandle_->get_logger(),
-                "Variance[0,10,100,110,120]: %f , %f , %f , %f , %f",
-                measurementVariances[0], measurementVariances[10],
-                measurementVariances[100], measurementVariances[110],
-                measurementVariances[120]);
-  } else if (measurementVariances.size() > 0) {
-    const int last = static_cast<int>(measurementVariances.size()) - 1;
-    RCLCPP_INFO(nodeHandle_->get_logger(),
-                "Variance[0,last]: %f , %f (N=%zu)",
-                measurementVariances[0], measurementVariances[last],
-                measurementVariances.size());
+    RCLCPP_DEBUG(nodeHandle_->get_logger(), "Variance vector is empty.");
   }
 
   boost::recursive_mutex::scoped_lock scopedLock(map_.getRawDataMutex());
@@ -767,6 +1090,7 @@ void ElevationMapping::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSh
             /*win_m=*/  layers_.cvar_window_m);
       }
     }
+        updateEmbeddedObstacleLayers();
 ////////////////////////////////////////////////////////////////////////////////////////////
     // ---- NAVGRID desde NEGATIVES: desconocido/libre/ocupado (solo negatives) ----
 
@@ -813,6 +1137,7 @@ void ElevationMapping::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSh
 /////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////
 //// nagrid con constantes
+if (enableNoGoCap_) {
 {
 auto& gm = map_.getRawGridMap();
 
@@ -868,7 +1193,9 @@ auto& gm = map_.getRawGridMap();
     }
   }
   }
+}
 //NAVGRID final: desconocido/libre/ocupado usando no_go_cap
+if (enableNavgrid_) {
 {
   // auto& gm = map_.getRawGridMap();
   // const std::string elev = gm.exists("elevation_inpainted") ? "elevation_inpainted" : "elevation";
@@ -985,10 +1312,12 @@ if (gm.exists(elev) && gm.exists(neg)) {
 }
 
 }
+}
 
 
 
 //////////////
+if (enableCapDebug_) {
 {
 // ---- DEBUG: capa 'cap_debug' (motivo de bloqueo) ----
 auto& gm = map_.getRawGridMap();
@@ -1061,7 +1390,7 @@ for (grid_map::GridMapIterator it(gm); !it.isPastEnd(); ++it) {
 
 // Log resumen (útil para ver rápido qué está bloqueando más)
 const int tot = std::accumulate(hist.begin(), hist.end(), 0);
-RCLCPP_INFO(nodeHandle_->get_logger(),
+RCLCPP_DEBUG(nodeHandle_->get_logger(),
   "cap_debug: OK=%d SLOPE=%d ROUGH=%d STEP=%d RISK=%d VAR=%d (tot=%d)",
   hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], tot);
 }
@@ -1069,7 +1398,7 @@ RCLCPP_INFO(nodeHandle_->get_logger(),
 
 {
   auto& gm = map_.getRawGridMap();
-  if (!gm.exists("cap_debug")) { /* nada que pintar */ }
+  if (!gm.exists("cap_debug") || !debugMarkersPub_ || debugMarkersPub_->get_subscription_count() == 0) { /* nada que pintar */ }
   else {
     const double res = gm.getResolution();
 
@@ -1117,6 +1446,7 @@ RCLCPP_INFO(nodeHandle_->get_logger(),
     for (auto& m : ms) arr.markers.push_back(m);
     debugMarkersPub_->publish(arr);
   }
+}
 }
 
 
@@ -1308,6 +1638,7 @@ void ElevationMapping::mapUpdateTimerCallback() {
           layers_.cvar_window_m /*, out="cvar_risk"*/);
     }
   }
+  updateEmbeddedObstacleLayers();
 
 // test for the noon go sites and marker how obstacles /////////////////////////////
 
@@ -1421,6 +1752,7 @@ auto& gm = map_.getRawGridMap();
 
 //////////////////// 
 //navgird con constantes
+if (enableNavgrid_) {
 {
 // auto& gm = map_.getRawGridMap();
 //   const std::string elev = gm.exists("elevation_inpainted") ? "elevation_inpainted" : "elevation";
@@ -1534,8 +1866,10 @@ for (grid_map::GridMapIterator it(gm); !it.isPastEnd(); ++it) {
   RCLCPP_WARN(nodeHandle_->get_logger(), "navgrid: faltan capas '%s' o '%s'", elev.c_str(), neg.c_str());
 }
 }
+}
 ////////////////////////////////
 
+if (enableCapDebug_) {
 {
 
   // ---- DEBUG: capa 'cap_debug' (motivo de bloqueo) ----
@@ -1609,13 +1943,13 @@ for (grid_map::GridMapIterator it(gm); !it.isPastEnd(); ++it) {
 
 // Log resumen (útil para ver rápido qué está bloqueando más)
 const int tot = std::accumulate(hist.begin(), hist.end(), 0);
-RCLCPP_INFO(nodeHandle_->get_logger(),
+RCLCPP_DEBUG(nodeHandle_->get_logger(),
   "cap_debug: OK=%d SLOPE=%d ROUGH=%d STEP=%d RISK=%d VAR=%d (tot=%d)",
   hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], tot);
 }
 {
   auto& gm = map_.getRawGridMap();
-  if (!gm.exists("cap_debug")) { /* nada que pintar */ }
+  if (!gm.exists("cap_debug") || !debugMarkersPub_ || debugMarkersPub_->get_subscription_count() == 0) { /* nada que pintar */ }
   else {
     const double res = gm.getResolution();
 
@@ -1663,6 +1997,7 @@ RCLCPP_INFO(nodeHandle_->get_logger(),
     for (auto& m : ms) arr.markers.push_back(m);
     debugMarkersPub_->publish(arr);
   }
+}
 }
 
 

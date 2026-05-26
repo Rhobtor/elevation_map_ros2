@@ -16,9 +16,14 @@ def generate_launch_description():
                         "input_map_topic": "/elevation_map_raw_post",
                         "output_map_topic": "/elevation_mapping/elevation_map_obstacles",
                         "input_pointcloud_topic": "",  # set to e.g. "/points_fused" if available
+                        "input_map_queue_size": 1,
 
                         # Input layer names
                         "elevation_layer": "elevation",
+                        "obs_layer": "obs_cost",
+                        "hard_layer": "p_hard",
+                        "soft_layer": "p_soft",
+                        "unknown_layer": "p_unknown",
                         "variance_layer": "variance",
                         "slope_layer": "slope",
                         "step_layer": "step",
@@ -83,7 +88,7 @@ def generate_launch_description():
                         "wu": 8.0,
 
                         # Debug markers
-                        "publish_markers": True,
+                        "publish_markers": False,
                         "hard_marker_threshold": 0.7,
                         "unknown_marker_threshold": 0.6,
                     }

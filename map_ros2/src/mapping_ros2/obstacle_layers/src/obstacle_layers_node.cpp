@@ -102,8 +102,13 @@ class ObstacleLayersNode final : public rclcpp::Node {
     input_map_topic_ = declare_parameter<std::string>("input_map_topic", "/elevation_map_raw_post");
     output_map_topic_ = declare_parameter<std::string>("output_map_topic", "/elevation_mapping/elevation_map_obstacles");
     input_cloud_topic_ = declare_parameter<std::string>("input_pointcloud_topic", std::string());
+    input_map_queue_size_ = declare_parameter<int>("input_map_queue_size", 1);
 
     elevation_layer_ = declare_parameter<std::string>("elevation_layer", "elevation");
+    obs_layer_ = declare_parameter<std::string>("obs_layer", "obs_cost");
+    hard_layer_ = declare_parameter<std::string>("hard_layer", "p_hard");
+    soft_layer_ = declare_parameter<std::string>("soft_layer", "p_soft");
+    unknown_layer_ = declare_parameter<std::string>("unknown_layer", "p_unknown");
     variance_layer_ = declare_parameter<std::string>("variance_layer", "variance");
     slope_layer_ = declare_parameter<std::string>("slope_layer", "slope");
     step_layer_ = declare_parameter<std::string>("step_layer", "step");
@@ -153,18 +158,18 @@ class ObstacleLayersNode final : public rclcpp::Node {
     ws_ = static_cast<float>(declare_parameter<double>("ws", 15.0));
     wu_ = static_cast<float>(declare_parameter<double>("wu", 8.0));
 
-    publish_markers_ = declare_parameter<bool>("publish_markers", true);
+    publish_markers_ = declare_parameter<bool>("publish_markers", false);
     hard_marker_threshold_ = static_cast<float>(declare_parameter<double>("hard_marker_threshold", 0.7));
     unknown_marker_threshold_ = static_cast<float>(declare_parameter<double>("unknown_marker_threshold", 0.6));
 
     // Match the elevation_mapping publisher QoS (RELIABLE)
-    rclcpp::QoS map_sub_qos(rclcpp::KeepLast(5));
+    rclcpp::QoS map_sub_qos(rclcpp::KeepLast(std::max(1, input_map_queue_size_)));
     map_sub_qos.reliable();
     map_sub_ = create_subscription<grid_map_msgs::msg::GridMap>(
         input_map_topic_, map_sub_qos,
         std::bind(&ObstacleLayersNode::onMap, this, std::placeholders::_1));
 
-    map_pub_ = create_publisher<grid_map_msgs::msg::GridMap>(output_map_topic_, rclcpp::SystemDefaultsQoS());
+    map_pub_ = create_publisher<grid_map_msgs::msg::GridMap>(output_map_topic_, rclcpp::QoS(1).reliable());
 
     if (!input_cloud_topic_.empty()) {
       cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -261,24 +266,25 @@ class ObstacleLayersNode final : public rclcpp::Node {
 
     grid_map::GridMap out = in;
 
-    const std::string support_z_layer = "support_z";
-    const std::string support_conf_layer = "support_conf";
-    const std::string height_rel_layer = "height_rel";
-    const std::string edge_score_layer = "edge_score";
-    const std::string vertical_occ_layer = "vertical_occ";
-    const std::string persist_layer = "persist_evidence";
-    const std::string p_hard_layer = "p_hard";
-    const std::string p_soft_layer = "p_soft";
-    const std::string p_unknown_layer = "p_unknown";
-    const std::string obs_cost_layer = "obs_cost";
+    const std::string& p_hard_layer = hard_layer_;
+    const std::string& p_soft_layer = soft_layer_;
+    const std::string& p_unknown_layer = unknown_layer_;
+    const std::string& obs_cost_layer = obs_layer_;
 
-    for (const auto& layer : {support_z_layer, support_conf_layer, height_rel_layer, edge_score_layer,
-                              vertical_occ_layer, persist_layer, p_hard_layer, p_soft_layer,
-                              p_unknown_layer, obs_cost_layer}) {
+    for (const auto& layer : {p_hard_layer, p_soft_layer, p_unknown_layer, obs_cost_layer}) {
       if (!out.exists(layer)) {
         out.add(layer, std::numeric_limits<float>::quiet_NaN());
       }
     }
+
+    const auto size = out.getSize();
+    const int rows = size(0);
+    const int cols = size(1);
+    grid_map::Matrix supportZ = grid_map::Matrix::Constant(rows, cols, std::numeric_limits<float>::quiet_NaN());
+    grid_map::Matrix supportConf = grid_map::Matrix::Zero(rows, cols);
+    grid_map::Matrix heightRel = grid_map::Matrix::Constant(rows, cols, std::numeric_limits<float>::quiet_NaN());
+    grid_map::Matrix edgeScore = grid_map::Matrix::Constant(rows, cols, std::numeric_limits<float>::quiet_NaN());
+    grid_map::Matrix verticalOcc = grid_map::Matrix::Constant(rows, cols, std::numeric_limits<float>::quiet_NaN());
 
     const float res = static_cast<float>(out.getResolution());
     const double res_d = static_cast<double>(res);
@@ -287,9 +293,6 @@ class ObstacleLayersNode final : public rclcpp::Node {
     const int max_support_count = (2 * radius_cells + 1) * (2 * radius_cells + 1);
 
     // 1) support_z + support_conf
-    grid_map::Matrix& supportZ = out[support_z_layer];
-    grid_map::Matrix& supportConf = out[support_conf_layer];
-
     for (grid_map::GridMapIterator it(out); !it.isPastEnd(); ++it) {
       const grid_map::Index idx(*it);
       if (!out.isValid(idx, elevation_layer_)) {
@@ -324,7 +327,6 @@ class ObstacleLayersNode final : public rclcpp::Node {
     }
 
     // 2) edge_score (local discontinuity on support_z AND on raw elevation to catch thin obstacles)
-    grid_map::Matrix& edgeScore = out[edge_score_layer];
     const bool hasElev = out.exists(elevation_layer_);
     for (grid_map::GridMapIterator it(out); !it.isPastEnd(); ++it) {
       const grid_map::Index idx(*it);
@@ -373,9 +375,6 @@ class ObstacleLayersNode final : public rclcpp::Node {
     }
 
     // 3) Optional point cloud features (height_rel, vertical_occ)
-    grid_map::Matrix& heightRel = out[height_rel_layer];
-    grid_map::Matrix& verticalOcc = out[vertical_occ_layer];
-
     const bool has_cloud = static_cast<bool>(last_cloud_);
     std::vector<CellReservoir> cells;
     if (has_cloud) {
@@ -475,7 +474,6 @@ class ObstacleLayersNode final : public rclcpp::Node {
     const uint64_t stale_threshold_sec = static_cast<uint64_t>(stale_reset_dt_s_);
 
     // 4) Probabilities + obs_cost with persistence
-    grid_map::Matrix& persist = out[persist_layer];
     grid_map::Matrix& pHard = out[p_hard_layer];
     grid_map::Matrix& pSoft = out[p_soft_layer];
     grid_map::Matrix& pUnknown = out[p_unknown_layer];
@@ -496,7 +494,6 @@ class ObstacleLayersNode final : public rclcpp::Node {
       const float sz = supportZ(idx(0), idx(1));
 
       if (!finite(sz)) {
-        persist(idx(0), idx(1)) = 0.0f;
         pHard(idx(0), idx(1)) = 0.0f;
         pSoft(idx(0), idx(1)) = 0.0f;
         pUnknown(idx(0), idx(1)) = 1.0f;
@@ -601,7 +598,6 @@ class ObstacleLayersNode final : public rclcpp::Node {
 
       const float pe = alpha_ * prev + (1.0f - alpha_) * inst_gated;
       persistState(idx(0), idx(1)) = pe;
-      persist(idx(0), idx(1)) = pe;
 
       float conf = clamp01(0.8f * conf_support + 0.2f * pe);
 
@@ -637,7 +633,8 @@ class ObstacleLayersNode final : public rclcpp::Node {
     }
 
     // 5) Publish
-    auto out_msg = grid_map::GridMapRosConverter::toMessage(out);
+    auto out_msg = grid_map::GridMapRosConverter::toMessage(
+      out, std::vector<std::string>{elevation_layer_, hard_layer_, soft_layer_, unknown_layer_, obs_layer_});
     out_msg->header.stamp = now();
     map_pub_->publish(*out_msg);
 
@@ -713,8 +710,13 @@ class ObstacleLayersNode final : public rclcpp::Node {
   std::string input_map_topic_;
   std::string output_map_topic_;
   std::string input_cloud_topic_;
+  int input_map_queue_size_{1};
 
   std::string elevation_layer_;
+  std::string obs_layer_;
+  std::string hard_layer_;
+  std::string soft_layer_;
+  std::string unknown_layer_;
   std::string variance_layer_;
   std::string slope_layer_;
   std::string step_layer_;

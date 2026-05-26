@@ -51,12 +51,19 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       enableVisibilityCleanup_(true),
       enableContinuousCleanup_(false),
       visibilityCleanupDuration_(0.0),
-      scanningDuration_(1.0) {
+      scanningDuration_(1.0),
+      fusedMapTopic_("elevation_map") {
+  if (!nodeHandle_->has_parameter("fused_output_topic")) {
+    nodeHandle_->declare_parameter("fused_output_topic", fusedMapTopic_);
+  }
+  nodeHandle_->get_parameter("fused_output_topic", fusedMapTopic_);
   rawMap_.setBasicLayers({"elevation", "variance"});
   fusedMap_.setBasicLayers({"elevation", "upper_bound", "lower_bound"});
   clear();
 
-  elevationMapFusedPublisher_ = nodeHandle_->create_publisher<grid_map_msgs::msg::GridMap>("elevation_map", 1);
+  if (!fusedMapTopic_.empty()) {
+    elevationMapFusedPublisher_ = nodeHandle_->create_publisher<grid_map_msgs::msg::GridMap>(fusedMapTopic_, 1);
+  }
   if (!underlyingMapTopic_.empty()) {
     underlyingMapSubscriber_ = nodeHandle_->create_subscription<grid_map_msgs::msg::GridMap>(underlyingMapTopic_, 1, std::bind(&ElevationMap::underlyingMapCallback, this, std::placeholders::_1));
   }
@@ -194,7 +201,7 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   rawMap_.setTimestamp(timestamp.nanoseconds());  // Point cloud stores time in microseconds.
 
   const std::chrono::duration<double> duration  = std::chrono::system_clock::now() - methodStartTime;
-  RCLCPP_INFO(nodeHandle_->get_logger(), "Raw map has been updated with a new point cloud in %f s.", duration.count());
+  RCLCPP_DEBUG(nodeHandle_->get_logger(), "Raw map has been updated with a new point cloud in %f s.", duration.count());
   return true;
 }
 
@@ -548,7 +555,7 @@ bool ElevationMap::postprocessAndPublishRawElevationMap() {
 }
 
 bool ElevationMap::publishFusedElevationMap() {
-  if (!hasFusedMapSubscribers()) {
+  if (!elevationMapFusedPublisher_ || !hasFusedMapSubscribers()) {
     return false;
   }
   boost::recursive_mutex::scoped_lock scopedLock(fusedMapMutex_);
@@ -647,7 +654,7 @@ float ElevationMap::cumulativeDistributionFunction(float x, float mean, float st
 }
 
 bool ElevationMap::hasFusedMapSubscribers() const {
-  return elevationMapFusedPublisher_->get_subscription_count() >= 1;
+  return elevationMapFusedPublisher_ && elevationMapFusedPublisher_->get_subscription_count() >= 1;
 }
 
 //sets frame id for both maps.
