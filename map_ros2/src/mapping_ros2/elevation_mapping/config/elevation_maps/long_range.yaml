@@ -3,6 +3,7 @@ elevation_mapping:
     postprocessor_num_threads: 1
     min_update_rate: 5.0
     time_tolerance: 0.5
+    obstacle_layers.enable: false
     obstacle_layers.compute_every_n: 2
     layers_enable.slope: true
     layers_enable.rough: true

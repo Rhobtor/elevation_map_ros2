@@ -28,6 +28,10 @@ PostprocessingPipelineFunctor::PostprocessingPipelineFunctor(std::shared_ptr<rcl
     secondaryPublisher_ = nodeHandle_->create_publisher<grid_map_msgs::msg::GridMap>(secondaryOutputTopic_, 1);
   }
 
+  if (filterChainParametersName_.empty()) {
+    return;
+  }
+
   // Setup filter chain.  
   if (!nodeHandle->has_parameter("filterChainParametersName_") ||
       !filterChain_.configure(filterChainParametersName_, nodeHandle_->get_node_logging_interface(), nodeHandle_->get_node_parameters_interface())) {
