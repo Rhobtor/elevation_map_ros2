@@ -1,6 +1,7 @@
-FROM ubuntu:jammy
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=humble
 
 # 1. Locale y utilidades básicas
 RUN apt-get update && apt-get install -y \
@@ -26,6 +27,7 @@ RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
 # 3. Instalar ROS 2 + herramientas de desarrollo
 RUN apt-get update && apt-get install -y \
     ros-humble-desktop \
+  ros-humble-rmw-cyclonedds-cpp \
     python3-colcon-common-extensions \
     python3-rosdep \
     python3-vcstool \
@@ -63,15 +65,26 @@ RUN bash -lc "apt-get update && \
 # Eliminar artefactos de build/install que pudieran haberse copiado desde el
 # host (contienen rutas absolutas) para forzar una compilación limpia en la
 # imagen y evitar que CMake use paths del sistema host.
-ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-ENV ROS_DOMAIN_ID=0
+# ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# ENV ROS_DOMAIN_ID=0
 
 # # Copiar configuración FastDDS para comunicación entre contenedores
 # COPY fastdds_host.xml /root/fastdds_host.xml
 # ENV FASTRTPS_DEFAULT_PROFILES_FILE=/root/fastdds_host.xml
 
-RUN bash -lc "source /opt/ros/humble/setup.bash && \
-    colcon build "
+RUN /bin/bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && \
+  colcon build --parallel-workers $(nproc) --symlink-install \
+  --event-handlers console_direct+ --base-paths src \
+  --cmake-args ' -DCMAKE_BUILD_TYPE=Release' \
+  ' -DCMAKE_LIBRARY_PATH=/usr/local/cuda/lib64/stubs' \
+  ' -DCMAKE_CXX_FLAGS="-Wl,--allow-shlib-undefined"' \
+  ' --no-warn-unused-cli' "
 
-# 8. Entorno por defecto
-CMD [\"bash\"]
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+
+COPY ros_entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bash"]

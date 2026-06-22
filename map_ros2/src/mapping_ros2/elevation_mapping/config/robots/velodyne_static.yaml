@@ -13,7 +13,7 @@
       type: pointcloud # Supported types: pointcloud
       topic: /merged_points_filtered
       queue_size: 1
-      publish_on_update: false # Update the raw map, but avoid a second publish/fusion pass when camera and lidar arrive almost together.
+      publish_on_update: true # Publish updates when the filtered ZED cloud arrives so the camera contribution is visible.
       sensor_processor:
         type: perfect
 
