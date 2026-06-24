@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     locales \
     curl \
     gnupg2 \
+  gettext-base \
     lsb-release \
     software-properties-common \
  && locale-gen en_US en_US.UTF-8 \
@@ -80,10 +81,14 @@ RUN /bin/bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && \
   ' -DCMAKE_CXX_FLAGS="-Wl,--allow-shlib-undefined"' \
   ' --no-warn-unused-cli' "
 
+RUN mkdir -p /etc/cyclonedds
+COPY local_cyclonedds.xml /etc/cyclonedds/local_cyclonedds.template.xml
+ENV CYCLONEDDS_URI=file:///etc/cyclonedds/local_cyclonedds.xml
+ENV DDS_IP=192.168.1.114
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
+COPY entrypoint_local.sh /entrypoint.sh
 
-COPY ros_entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

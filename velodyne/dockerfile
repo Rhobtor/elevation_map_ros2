@@ -178,7 +178,7 @@ RUN /bin/bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && \
 RUN mkdir -p /etc/cyclonedds
 COPY local_cyclonedds.xml /etc/cyclonedds/local_cyclonedds.template.xml
 ENV CYCLONEDDS_URI=file:///etc/cyclonedds/local_cyclonedds.xml
-ENV DDS_IP=192.168.1.117
+ENV DDS_IP=192.168.1.114
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 COPY entrypoint_local.sh /entrypoint.sh
