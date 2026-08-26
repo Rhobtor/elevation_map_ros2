@@ -1,21 +1,35 @@
 /**:
   ros__parameters:
-    inputs: ['ground_truth_cloud', 'camera_cloud']
-    ground_truth_cloud: # A name to identify the input source
+    inputs: ['velodyne_cloud', 'camera_cloud']
+    velodyne_cloud:
       type: pointcloud # Supported types: pointcloud
-      topic: /velodyne_points
+      topic: /velodyne_points_filtered
       queue_size: 1
-      publish_on_update: true # Whether to publish the elevation map after a callback from this source.
+      publish_on_update: true
       sensor_processor:
-        type: perfect
+        type: laser
+        min_radius: 0.015
+        beam_angle: 0.0014
+        beam_constant: 0.0015
+        apply_voxelgrid_filter: true
+        voxelgrid_filter_size: 0.15
+        ignore_points_above: 2.0
+        ignore_points_below: -2.0
 
-    camera_cloud: # A name to identify the input source
-      type: pointcloud # Supported types: pointcloud
-      topic: /merged_points_filtered
+    camera_cloud:
+      type: pointcloud
+      topic: /camera/points_filtered
       queue_size: 1
-      publish_on_update: false # Update the raw map, but avoid a second publish/fusion pass when camera and lidar arrive almost together.
+      publish_on_update: true
       sensor_processor:
-        type: perfect
+        type: laser
+        min_radius: 0.03
+        beam_angle: 0.003
+        beam_constant: 0.005
+        apply_voxelgrid_filter: true
+        voxelgrid_filter_size: 0.20
+        ignore_points_above: 2.0
+        ignore_points_below: -1.5
 
     # Use TF only (no odometry topic). This is useful to test with a fixed sensor.
     # Leaving this empty makes elevation_mapping skip pose covariance updates.

@@ -29,6 +29,12 @@ float intAsFloat(const uint32_t input) {
   std::memcpy(&output, &input, sizeof(uint32_t));
   return output;
 }
+
+uint32_t floatAsInt(const float input) {
+  uint32_t output;
+  std::memcpy(&output, &input, sizeof(uint32_t));
+  return output;
+}
 }  // namespace
 
 namespace elevation_mapping {
@@ -52,6 +58,7 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       enableContinuousCleanup_(false),
       visibilityCleanupDuration_(0.0),
       scanningDuration_(1.0),
+      maxCellAge_(0.0),
       fusedMapTopic_("elevation_map") {
   if (!nodeHandle_->has_parameter("fused_output_topic")) {
     nodeHandle_->declare_parameter("fused_output_topic", fusedMapTopic_);
@@ -147,6 +154,14 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
       horizontalVarianceY = minHorizontalVariance_;
       horizontalVarianceXY = 0.0;
       grid_map::colorVectorToValue(point.getRGBVector3i(), color);
+      time = scanTimeSinceInitialization;
+      dynamicTime = currentTimeSecondsPattern;
+      const float pointHeightPlusUncertainty = point.z + 3.0f * std::sqrt(pointVariance);
+      lowestScanPoint = pointHeightPlusUncertainty;
+      const grid_map::Position3 sensorTranslation(transformationSensorToMap.translation());
+      sensorXatLowestScan = sensorTranslation.x();
+      sensorYatLowestScan = sensorTranslation.y();
+      sensorZatLowestScan = sensorTranslation.z();
       continue;
     }
 
@@ -452,9 +467,22 @@ void ElevationMap::visibilityCleanup(const rclcpp::Time& updatedTime) {
 
   // Vector of indices that will be removed.
   std::vector<grid_map::Position> cellPositionsToRemove;
+  const uint32_t updatedTimeSeconds = static_cast<uint32_t>(
+    nodeHandle_->get_clock()->now().seconds());
   for (grid_map::GridMapIterator iterator(visibilityCleanupMap_); !iterator.isPastEnd(); ++iterator) {
     if (!visibilityCleanupMap_.isValid(*iterator)) {
       continue;
+    }
+    if (maxCellAge_ > 0.0) {
+      const uint32_t lastUpdateSeconds = floatAsInt(
+        visibilityCleanupMap_.at("dynamic_time", *iterator));
+      if (lastUpdateSeconds == 0u ||
+          updatedTimeSeconds - lastUpdateSeconds > static_cast<uint32_t>(std::ceil(maxCellAge_))) {
+        grid_map::Position position;
+        visibilityCleanupMap_.getPosition(*iterator, position);
+        cellPositionsToRemove.push_back(position);
+        continue;
+      }
     }
     const auto& time = visibilityCleanupMap_.at("time", *iterator);
     if (timeSinceInitialization - time > scanningDuration_) {
@@ -479,7 +507,9 @@ void ElevationMap::visibilityCleanup(const rclcpp::Time& updatedTime) {
       continue;
     }
     if (rawMap_.isValid(index)) {
-      rawMap_.at("elevation", index) = NAN;
+      for (const auto& layer : rawMap_.getLayers()) {
+        rawMap_.at(layer, index) = NAN;
+      }
       rawMap_.at("dynamic_time", index) = 0.0f;
     }
   }

@@ -328,6 +328,7 @@ class ElevationMap {
   bool enableContinuousCleanup_;
   double visibilityCleanupDuration_;
   double scanningDuration_;
+  double maxCellAge_;
   std::string fusedMapTopic_;
 };
 

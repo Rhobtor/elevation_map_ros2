@@ -31,10 +31,10 @@ elevation_mapping:
     position_x: 0.0
     position_y: 0.0
     resolution: 0.15
-    min_variance: 0.01
-    max_variance: 0.05
-    mahalanobis_distance_threshold: 3.5
-    multi_height_noise: 0.01
+    min_variance: 0.0004
+    max_variance: 0.01
+    mahalanobis_distance_threshold: 2.5
+    multi_height_noise: 0.0025
     fused_map_publishing_rate: 10.0
     enable_skip_lower_points: false
     # Visibility cleanup: ray-traces every scan and sets elevation=NaN for cells
@@ -46,3 +46,4 @@ elevation_mapping:
     scanning_duration: 0.01
     remove_penetrated_points_rate: 5.0
     visibility_cleanup_rate: 4.0
+    max_cell_age: 3.0
