@@ -3,8 +3,11 @@ elevation_mapping:
     postprocessor_num_threads: 1
     min_update_rate: 5.0
     time_tolerance: 0.5
-    obstacle_layers.enable: false
+    obstacle_layers.enable: true
     obstacle_layers.compute_every_n: 2
+    obstacle_layers.alpha: 0.90
+    obstacle_layers.stale_reset_dt_s: 5.0
+    obstacle_layers.spike_persist_warmup: 0.45
     layers_enable.slope: true
     layers_enable.rough: true
     layers_enable.step: true
@@ -45,5 +48,5 @@ elevation_mapping:
     enable_visibility_cleanup: true
     scanning_duration: 0.01
     remove_penetrated_points_rate: 5.0
-    visibility_cleanup_rate: 4.0
-    max_cell_age: 3.0
+    visibility_cleanup_rate: 2.0
+    max_cell_age: 5.0

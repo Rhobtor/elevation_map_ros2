@@ -12,6 +12,12 @@
 
 #include "rclcpp/rclcpp.hpp"
 
+#include "tf2/LinearMath/Transform.h"
+#include "tf2/LinearMath/Vector3.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
+
 #include "grid_map_core/GridMap.hpp"
 #include "grid_map_core/iterators/GridMapIterator.hpp"
 #include "grid_map_core/iterators/SubmapIterator.hpp"
@@ -103,6 +109,8 @@ class ObstacleLayersNode final : public rclcpp::Node {
     output_map_topic_ = declare_parameter<std::string>("output_map_topic", "/elevation_mapping/elevation_map_obstacles");
     input_cloud_topic_ = declare_parameter<std::string>("input_pointcloud_topic", std::string());
     input_map_queue_size_ = declare_parameter<int>("input_map_queue_size", 1);
+    tf_timeout_sec_ = declare_parameter<double>("tf_timeout_sec", 0.10);
+    use_latest_tf_if_unavailable_ = declare_parameter<bool>("use_latest_tf_if_unavailable", true);
 
     elevation_layer_ = declare_parameter<std::string>("elevation_layer", "elevation");
     obs_layer_ = declare_parameter<std::string>("obs_layer", "obs_cost");
@@ -177,6 +185,9 @@ class ObstacleLayersNode final : public rclcpp::Node {
           std::bind(&ObstacleLayersNode::onCloud, this, std::placeholders::_1));
     }
 
+            tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+            tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
     if (publish_markers_) {
       markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
           "obstacle_layers/markers", rclcpp::SystemDefaultsQoS());
@@ -205,6 +216,12 @@ class ObstacleLayersNode final : public rclcpp::Node {
   float robustLocalSupport(const grid_map::GridMap& map, const grid_map::Index& index, int radius_cells) const {
     if (!map.isValid(index, elevation_layer_)) return std::numeric_limits<float>::quiet_NaN();
 
+    const auto size = map.getSize();
+    const auto inside = [&size](const grid_map::Index& candidate) {
+      return candidate(0) >= 0 && candidate(0) < size(0) &&
+             candidate(1) >= 0 && candidate(1) < size(1);
+    };
+
     std::vector<float> zs;
     zs.reserve(static_cast<size_t>((2 * radius_cells + 1) * (2 * radius_cells + 1)));
 
@@ -214,6 +231,7 @@ class ObstacleLayersNode final : public rclcpp::Node {
     for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
       for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
         grid_map::Index n(index(0) + dx, index(1) + dy);
+        if (!inside(n)) continue;
         if (!map.isValid(n)) continue;
         if (!map.isValid(n, elevation_layer_)) continue;
         if (hasVar && map.isValid(n, variance_layer_)) {
@@ -291,6 +309,10 @@ class ObstacleLayersNode final : public rclcpp::Node {
     const double denom = std::max(1e-6, res_d);
     const int radius_cells = std::max(1, static_cast<int>(std::ceil(support_window_m_ / denom)));
     const int max_support_count = (2 * radius_cells + 1) * (2 * radius_cells + 1);
+    const auto inside = [&size](const grid_map::Index& candidate) {
+      return candidate(0) >= 0 && candidate(0) < size(0) &&
+             candidate(1) >= 0 && candidate(1) < size(1);
+    };
 
     // 1) support_z + support_conf
     for (grid_map::GridMapIterator it(out); !it.isPastEnd(); ++it) {
@@ -308,6 +330,7 @@ class ObstacleLayersNode final : public rclcpp::Node {
         for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
           for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
             grid_map::Index n(idx(0) + dx, idx(1) + dy);
+            if (!inside(n)) continue;
             if (!out.isValid(n)) continue;
             if (!out.isValid(n, elevation_layer_)) continue;
             if (hasVar && out.isValid(n, variance_layer_)) {
@@ -342,6 +365,7 @@ class ObstacleLayersNode final : public rclcpp::Node {
         for (int dy = -1; dy <= 1; ++dy) {
           if (dx == 0 && dy == 0) continue;
           grid_map::Index n(idx(0) + dx, idx(1) + dy);
+          if (!inside(n)) continue;
           if (!out.isValid(n)) continue;
           const float zn = supportZ(n(0), n(1));
           if (!finite(zn)) continue;
@@ -361,6 +385,7 @@ class ObstacleLayersNode final : public rclcpp::Node {
             for (int dy = -1; dy <= 1; ++dy) {
               if (dx == 0 && dy == 0) continue;
               grid_map::Index n(idx(0) + dx, idx(1) + dy);
+              if (!inside(n)) continue;
               if (!out.isValid(n)) continue;
               if (!out.isValid(n, elevation_layer_)) continue;
               const float en = out.at(elevation_layer_, n);
@@ -379,11 +404,40 @@ class ObstacleLayersNode final : public rclcpp::Node {
     std::vector<CellReservoir> cells;
     if (has_cloud) {
       const auto& cloud = *last_cloud_;
-      if (cloud.header.frame_id != out.getFrameId()) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                             "PointCloud frame_id='%s' != map frame_id='%s' (skipping cloud; provide cloud in map frame)",
-                             cloud.header.frame_id.c_str(), out.getFrameId().c_str());
-      } else {
+      tf2::Transform cloud_to_map;
+      bool have_cloud_transform = cloud.header.frame_id == out.getFrameId();
+      if (!have_cloud_transform) {
+        try {
+          const auto transform = tf_buffer_->lookupTransform(
+            out.getFrameId(), cloud.header.frame_id,
+            rclcpp::Time(cloud.header.stamp),
+            rclcpp::Duration::from_seconds(tf_timeout_sec_));
+          tf2::fromMsg(transform.transform, cloud_to_map);
+          have_cloud_transform = true;
+        } catch (const tf2::TransformException& ex) {
+          if (use_latest_tf_if_unavailable_) {
+            try {
+              const auto transform = tf_buffer_->lookupTransform(
+                out.getFrameId(), cloud.header.frame_id, tf2::TimePointZero);
+              tf2::fromMsg(transform.transform, cloud_to_map);
+              have_cloud_transform = true;
+              RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 3000,
+                "No TF %s <- %s at cloud timestamp; using latest TF",
+                out.getFrameId().c_str(), cloud.header.frame_id.c_str());
+            } catch (const tf2::TransformException&) {
+            }
+          }
+          if (!have_cloud_transform) {
+            RCLCPP_WARN_THROTTLE(
+              get_logger(), *get_clock(), 2000,
+              "No TF %s <- %s for point cloud (skipping cloud): %s",
+              out.getFrameId().c_str(), cloud.header.frame_id.c_str(), ex.what());
+          }
+        }
+      }
+
+      if (have_cloud_transform) {
         const auto size = out.getSize();
         const int rows = size(0);
         const int cols = size(1);
@@ -397,10 +451,16 @@ class ObstacleLayersNode final : public rclcpp::Node {
         sensor_msgs::PointCloud2ConstIterator<float> iter_z(cloud, "z");
 
         for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
-          const float x = *iter_x;
-          const float y = *iter_y;
-          const float z = *iter_z;
-          if (!finite(x) || !finite(y) || !finite(z)) continue;
+          const float sensor_x = *iter_x;
+          const float sensor_y = *iter_y;
+          const float sensor_z = *iter_z;
+          if (!finite(sensor_x) || !finite(sensor_y) || !finite(sensor_z)) continue;
+
+          const tf2::Vector3 point_in_map = cloud_to_map *
+            tf2::Vector3(sensor_x, sensor_y, sensor_z);
+          const float x = static_cast<float>(point_in_map.x());
+          const float y = static_cast<float>(point_in_map.y());
+          const float z = static_cast<float>(point_in_map.z());
 
           grid_map::Position pos(x, y);
           if (!out.isInside(pos)) continue;
@@ -757,6 +817,8 @@ class ObstacleLayersNode final : public rclcpp::Node {
   bool publish_markers_{true};
   float hard_marker_threshold_{0.7f};
   float unknown_marker_threshold_{0.6f};
+  double tf_timeout_sec_{0.10};
+  bool use_latest_tf_if_unavailable_{true};
 
   // State
   std::optional<grid_map::Matrix> persist_evidence_;
@@ -767,6 +829,8 @@ class ObstacleLayersNode final : public rclcpp::Node {
   rclcpp::Publisher<grid_map_msgs::msg::GridMap>::SharedPtr map_pub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 };
 
 }  // namespace obstacle_layers

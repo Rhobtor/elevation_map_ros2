@@ -3,4 +3,4 @@ elevation_mapping:
     fused_output_topic: ""
     output_topic: elevation_map
     postprocessor_pipeline_name: ""
-    output_layers: [elevation, variance, step, slope, rough]
+    output_layers: [elevation, variance, step, slope, rough, p_hard, p_soft, p_unknown, obs_cost]

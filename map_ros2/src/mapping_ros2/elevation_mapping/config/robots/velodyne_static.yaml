@@ -18,7 +18,7 @@
 
     camera_cloud:
       type: pointcloud
-      topic: /camera/points_filtered
+      topic: /merged_points_filtered
       queue_size: 1
       publish_on_update: true
       sensor_processor:
