@@ -63,7 +63,7 @@ class ElevationMap {
    * @return true if successful.
    */
   bool add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& pointCloudVariances, const rclcpp::Time& timeStamp,
-           const Eigen::Affine3d& transformationSensorToMap);
+           const Eigen::Affine3d& transformationSensorToMap, grid_map::GridMap* observations = nullptr);
 
   /*!
    * Update the elevation map with variance update data.

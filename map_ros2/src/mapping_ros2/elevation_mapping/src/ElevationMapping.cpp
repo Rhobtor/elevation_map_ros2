@@ -100,7 +100,32 @@ ElevationMapping::ElevationMapping(std::shared_ptr<rclcpp::Node>& nodeHandle) :
   RCLCPP_INFO(nodeHandle_->get_logger(), "Elevation mapping node started.");
 
   readParameters();
+  sensorObservationsEnabled_ = nodeHandle_->declare_parameter("sensor_observations.enabled", false);
+  sensorObservationsSource_ =
+    nodeHandle_->declare_parameter<std::string>("sensor_observations.source", "velodyne_cloud");
+  const auto observationTopic = nodeHandle_->declare_parameter<std::string>(
+    "sensor_observations.topic", "/elevation_mapping/velodyne_observations");
+  if (sensorObservationsEnabled_) {
+    if (sensorObservationsSource_ != "velodyne_cloud" || observationTopic.empty()) {
+      throw std::invalid_argument("sensor observations currently require source velodyne_cloud and a nonempty topic");
+    }
+    const auto resolve = [this](const std::string& topic) {
+      return rclcpp::expand_topic_or_service_name(
+        topic, nodeHandle_->get_name(), nodeHandle_->get_namespace(), false);
+    };
+    if (resolve(observationTopic) == resolve(nodeHandle_->get_parameter("output_topic").as_string())) {
+      throw std::invalid_argument("sensor observations must not share the historical map topic");
+    }
+    sensorObservationsPublisher_ = nodeHandle_->create_publisher<grid_map_msgs::msg::GridMap>(
+      observationTopic, rclcpp::QoS(10).reliable());
+    RCLCPP_INFO(nodeHandle_->get_logger(),
+      "Fresh Velodyne evidence on %s; requires the existing velodyne_cloud input/filter. No sensor nodes are started.",
+      observationTopic.c_str());
+  }
   setupSubscribers();
+  if (sensorObservationsEnabled_ && !nodeHandle_->has_parameter("velodyne_cloud.topic")) {
+    throw std::invalid_argument("fresh evidence requires a configured velodyne_cloud input");
+  }
   setupServices();
   setupTimers();
 
@@ -867,7 +892,8 @@ bool ElevationMapping::initialize() {
 
 void ElevationMapping::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSharedPtr pointCloudMsg,
                                           bool publishPointCloud,
-                                          const SensorProcessorBase::Ptr& sensorProcessor_) {
+                                          const SensorProcessorBase::Ptr& sensorProcessor_,
+                                          const std::string& sourceName) {
   RCLCPP_DEBUG(nodeHandle_->get_logger(), "Processing data from: %s", pointCloudMsg->header.frame_id.c_str());
   if (!updatesEnabled_) {
     auto clock = nodeHandle_->get_clock();
@@ -964,10 +990,22 @@ void ElevationMapping::pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSh
   }
 
   // Add point cloud to elevation map.
+  grid_map::GridMap observations;
+  const auto acquisitionNs = rclcpp::Time(pointCloudMsg->header.stamp, RCL_ROS_TIME).nanoseconds();
+  const bool exportObservations = sensorObservationsEnabled_ && sourceName == sensorObservationsSource_ &&
+    acquisitionNs > lastSensorObservationNs_;
+  if (sensorObservationsEnabled_ && sourceName == sensorObservationsSource_ && acquisitionNs <= 0) {
+    RCLCPP_ERROR(nodeHandle_->get_logger(), "Fresh sensor evidence needs a positive original acquisition stamp");
+  }
   if (!map_.add(pointCloudProcessed, measurementVariances, lastPointCloudUpdateTime_,
-                Eigen::Affine3d(sensorProcessor_->transformationSensorToMap_))) {
+                Eigen::Affine3d(sensorProcessor_->transformationSensorToMap_),
+                exportObservations ? &observations : nullptr)) {
     RCLCPP_ERROR(nodeHandle_->get_logger(), "Adding point cloud to elevation map failed.");
     return;
+  }
+  if (exportObservations) {
+    sensorObservationsPublisher_->publish(grid_map::GridMapRosConverter::toMessage(observations));
+    lastSensorObservationNs_ = acquisitionNs;
   }
 
   // ====== CAPAS LIGERAS + PESADAS (con protección) ======

@@ -5,6 +5,119 @@
 This is a quick port of [Robot-Centric Elevation Mapping](https://github.com/ANYbotics/elevation_mapping) to ROS2 based on Aber-CRANC's [tf2 branch](https://github.com/Aber-CRANC/elevation_mapping/tree/tf2).
 Tested in ROS2 humble.
 
+## Optional fresh Velodyne observations (Phase 0.5)
+
+The existing mapper can export the current processed Velodyne acquisition without modifying the
+historical elevation map. This is a transient observation output, not another mapper or node.
+Default behavior remains unchanged: export is disabled.
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/PHD/elevation_map_ros2/install/local_setup.bash
+ros2 launch elevation_mapping elevationMappingVelodyne.launch.py \
+  publish_sensor_observations:=true
+```
+
+The launch does **not** start the LiDAR or its filter. The installed robot configuration selects
+`velodyne_cloud` on `/velodyne_points_filtered`, produced by the existing Velodyne filter from
+`/velodyne_points`. Verify that chain is running first; do not start duplicate filters.
+`J8_unity.launch.py` currently supplies robot/TF but does not launch that filter.
+The camera input remains unchanged and cannot generate this observation output.
+
+Parameters:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `sensor_observations.enabled` | `false` | Enable the optional output |
+| `sensor_observations.source` | `velodyne_cloud` | Actual configured input-source identity; only Velodyne is supported in this phase |
+| `sensor_observations.topic` | `/elevation_mapping/velodyne_observations` | Dedicated reliable, depth-10 `GridMap` output; cannot equal the historical output topic |
+
+The source name is passed by the existing input callback binding, not inferred from a frame name.
+The dedicated output represents only that source, so its acquisition key is `(configured source,
+original PointCloud2 stamp)`. Equal/older stamps do not export again. They still follow the original
+historical-map code, preserving the existing behavior for identical input sequences.
+Failed processing does not consume an acquisition. A successfully processed empty acquisition can
+publish an all-unknown observation; it is never evidence of free terrain.
+
+Export uses points already filtered, transformed into the map frame and assigned measurement
+variance. It records evidence before history-dependent height rejection/fusion. No TF, point-cloud
+filtering, historical lookup or ray-clearing pipeline is duplicated.
+
+Layers:
+
+| Layer | Meaning |
+|---|---|
+| `elevation` | Highest supported processed-point Z in each current-scan cell |
+| `measurement_variance` | Map-Z variance of the selected highest point; maximum variance for tied heights |
+| `observation_provenance` | 1 for current sensor-supported cells, 0 elsewhere |
+| `minimum_elevation` | Lowest supported processed-point Z in the same cell |
+| `point_count` | Number of supported processed points; not independent confirmations |
+
+Unobserved elevations/variance/minima are NaN; counts and provenance are zero.
+Mixed ground/obstacle heights are not averaged. The maximum is a conservative measured envelope,
+**not a claim about a traversable support surface**. Minimum/maximum expose ambiguity, but do not
+resolve overhangs or provide vehicle clearance.
+Invalid measurement variance does not create verified evidence. The variance is model-based, not
+a calibrated probability/confidence.
+
+Frame, geometry and circular-buffer indices match the raw map at acquisition processing time.
+The output stamp is the original input cloud stamp, never a newly assigned publication time.
+The Unity publisher stamps the completed scan with UTC time; this is a scan reference, not an exact
+per-ray acquisition time. Current voxel filters discard per-point timing; no deskew is added here.
+Repeated data deliberately re-stamped upstream cannot be distinguished from a new acquisition.
+Clock rollback/restarted datasets require an explicit reset/restart strategy, not automatic clearing.
+Duplicate high-water marks are in process memory.
+
+The export does not use historical cells, visibility clearing or cell aging as measured ground.
+It does not change fusion, raw/fused layers, standard publication settings, RA-L, MPPI or planning.
+
+### Tests
+
+`test_sensor_observations` checks conservative aggregation, selected variance, asymmetric XYZ,
+nonzero origins/circular buffers, unknown cells, lower returns rejected by the historical fusion,
+and equality of every legacy layer with export enabled/disabled.
+Its paired 19,600-point/21 x 21 m benchmark alternates both modes, warms up ten times and reports
+80 samples of median/p95 wall time and mean process CPU. Enabled measurements include observation
+creation and GridMap serialization, but exclude DDS delivery and downstream memory.
+
+Final local Release-build measurements (80 samples per mode):
+
+| Export | Median wall (ms) | p95 wall (ms) | Mean process CPU (ms) |
+|---|---:|---:|---:|
+| Disabled | 0.346 | 0.552 | 0.368 |
+| Enabled, including serialization | 0.458 | 0.696 | 0.483 |
+
+The added median wall time was 0.112 ms and added mean CPU time 0.115 ms per acquisition
+in this benchmark. These are not whole-mapper timings or a live workload capacity guarantee.
+All five new mapper tests passed.
+
+The compressed-memory package additionally runs actual installed mapper processes with export
+enabled/disabled and an installed memory process in isolated domain 193. It verifies unchanged
+standard published maps, exact source stamps, source exclusion, duplicate rejection, three higher
+and three lower acquisitions, unknown coverage and TF translation/rotation/Z alignment.
+It reports end-to-end latencies separately; these are synthetic stationary tests, not live navigation.
+In the final run, median historical-output latency was 0.880 ms disabled/0.655 ms enabled and
+median observation-output latency was 1.467 ms. The small sample sizes (9/9/8) and scheduling
+prevent interpreting that historical-output difference as a speedup. Maxima were 982/992/992 ms,
+including initial startup. The test measures publisher-to-subscriber wall time, not source-stamp
+age and not downstream memory completion time.
+
+The old `test_elevation_mapping_input_sources` currently has six pre-existing failures: three input
+fixtures do not load their intended configuration, and three constructors lack
+`postprocessor_num_threads`. The same six failures were reproduced using the untouched pre-phase
+test executable. Its XML property name is also invalid. These unrelated legacy tests were not changed
+or disabled.
+
+Modified mapper files in this phase:
+[ElevationMap.hpp](include/elevation_mapping/ElevationMap.hpp),
+[ElevationMap.cpp](src/ElevationMap.cpp),
+[ElevationMapping.hpp](include/elevation_mapping/ElevationMapping.hpp),
+[ElevationMapping.cpp](src/ElevationMapping.cpp),
+[Input.hpp](include/elevation_mapping/input_sources/Input.hpp),
+[Velodyne launch](launch/elevationMappingVelodyne.launch.py),
+[test_sensor_observations.cpp](test/test_sensor_observations.cpp),
+[CMakeLists.txt](CMakeLists.txt), and this README.
+
 ### Changes in ROS2 version:
 - `point_cloud_topic` parameter was removed
 - `input_sources` parameter was introduced to specify list of input sources eg. `["top", "front"]`

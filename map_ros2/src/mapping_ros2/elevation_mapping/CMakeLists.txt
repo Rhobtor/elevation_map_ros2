@@ -473,6 +473,12 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_${PROJECT_NAME}_input_sources ${DEPENDENCIES})
   target_link_libraries(test_${PROJECT_NAME}_input_sources ${PROJECT_NAME}_library)
+  ament_add_gtest(test_sensor_observations test/test_sensor_observations.cpp)
+  ament_target_dependencies(test_sensor_observations ${DEPENDENCIES})
+  target_link_libraries(test_sensor_observations ${PROJECT_NAME}_library)
+  set_tests_properties(test_sensor_observations PROPERTIES
+    ENVIRONMENT "ROS_DOMAIN_ID=193;ROS_LOCALHOST_ONLY=1"
+    RESOURCE_LOCK compressed_map_ros_domain_193)
 endif()
 
 #############

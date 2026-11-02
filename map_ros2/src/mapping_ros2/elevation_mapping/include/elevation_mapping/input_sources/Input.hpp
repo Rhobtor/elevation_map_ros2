@@ -25,7 +25,7 @@ class ElevationMapping;  // Forward declare to avoid cyclic import dependency.
 class Input {
  public:
   template <typename MsgT>
-  using CallbackT = void (ElevationMapping::*)(MsgT, bool, const SensorProcessorBase::Ptr&);
+  using CallbackT = void (ElevationMapping::*)(MsgT, bool, const SensorProcessorBase::Ptr&, const std::string&);
 
   /**
    * @brief Constructor.
@@ -105,7 +105,8 @@ void Input::registerCallback(ElevationMapping& map, CallbackT<MsgT> callback) {
   auto qos = rclcpp::SensorDataQoS().keep_last(queue_size);
 
   std::function<void(sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)> bound_callback_func =
-  std::bind(callback, std::ref(map), std::placeholders::_1, parameters.publishOnUpdate_, std::ref(sensorProcessor_));
+  std::bind(callback, std::ref(map), std::placeholders::_1, parameters.publishOnUpdate_,
+    std::ref(sensorProcessor_), parameters.name_);
 
   subscriber_ = nodeHandle_->create_subscription<sensor_msgs::msg::PointCloud2>(parameters.topic_, qos,
     bound_callback_func);

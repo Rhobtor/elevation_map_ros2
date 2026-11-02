@@ -83,7 +83,7 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
 ElevationMap::~ElevationMap() = default;
 
 bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& pointCloudVariances, const rclcpp::Time& timestamp,
-                       const Eigen::Affine3d& transformationSensorToMap) {
+                       const Eigen::Affine3d& transformationSensorToMap, grid_map::GridMap* observations) {
   if (static_cast<unsigned int>(pointCloud->size()) != static_cast<unsigned int>(pointCloudVariances.size())) {
     RCLCPP_ERROR(nodeHandle_->get_logger(), "ElevationMap::add: Size of point cloud (%i) and variances (%i) do not agree.", (int)pointCloud->size(),
               (int)pointCloudVariances.size());
@@ -95,6 +95,28 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   const rclcpp::Time currentTime = nodeHandle_->get_clock()->now();
   const float currentTimeSecondsPattern{intAsFloat(static_cast<uint32_t>(static_cast<uint64_t>(currentTime.seconds())))};
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
+
+  grid_map::Matrix* observationElevation = nullptr;
+  grid_map::Matrix* observationVariance = nullptr;
+  grid_map::Matrix* observationMinimum = nullptr;
+  grid_map::Matrix* observationCount = nullptr;
+  grid_map::Matrix* observationProvenance = nullptr;
+  if (observations) {
+    *observations = grid_map::GridMap({
+      "elevation", "measurement_variance", "observation_provenance", "minimum_elevation", "point_count"});
+    observations->setGeometry(rawMap_.getLength(), rawMap_.getResolution(), rawMap_.getPosition());
+    observations->setStartIndex(rawMap_.getStartIndex());
+    observations->setFrameId(rawMap_.getFrameId());
+    observations->setTimestamp(timestamp.nanoseconds());
+    (*observations)["observation_provenance"].setZero();
+    (*observations)["point_count"].setZero();
+    observations->setBasicLayers({"elevation"});
+    observationElevation = &observations->get("elevation");
+    observationVariance = &observations->get("measurement_variance");
+    observationMinimum = &observations->get("minimum_elevation");
+    observationCount = &observations->get("point_count");
+    observationProvenance = &observations->get("observation_provenance");
+  }
 
   // Update initial time if it is not initialized.
   if (initialTime_.seconds() == 0) {
@@ -143,6 +165,20 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     auto& sensorZatLowestScan = sensorZatLowestScanLayer(index(0), index(1));
 
     const float& pointVariance = pointCloudVariances(i);
+    if (observations && std::isfinite(point.z) && std::isfinite(pointVariance) && pointVariance >= 0.0F) {
+      auto& maximum = (*observationElevation)(index(0), index(1));
+      auto& minimum = (*observationMinimum)(index(0), index(1));
+      if (!std::isfinite(maximum) || point.z > maximum) {
+        maximum = point.z;
+        (*observationVariance)(index(0), index(1)) = pointVariance;
+      } else if (point.z == maximum) {
+        auto& variance = (*observationVariance)(index(0), index(1));
+        variance = std::max(variance, pointVariance);
+      }
+      minimum = std::isfinite(minimum) ? std::min(minimum, point.z) : point.z;
+      (*observationProvenance)(index(0), index(1)) = 1.0F;
+      (*observationCount)(index(0), index(1)) += 1.0F;
+    }
     bool isValid = std::all_of(basicLayers_.begin(), basicLayers_.end(),
                                [&](Eigen::Ref<const grid_map::Matrix> layer) { 
                                 return std::isfinite(layer(index(0), index(1))); });

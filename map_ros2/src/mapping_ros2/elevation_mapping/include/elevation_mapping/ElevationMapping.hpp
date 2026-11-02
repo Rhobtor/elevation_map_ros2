@@ -161,6 +161,10 @@ class ElevationMapping {
     LayerConfig layers_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr obstaclesGridPub_;
     std::optional<grid_map::Matrix> obstaclePersistEvidence_;
+    bool sensorObservationsEnabled_{false};
+    std::string sensorObservationsSource_;
+    rclcpp::Publisher<grid_map_msgs::msg::GridMap>::SharedPtr sensorObservationsPublisher_;
+    std::int64_t lastSensorObservationNs_{0};
 
 
 
@@ -185,7 +189,7 @@ class ElevationMapping {
    * @param sensorProcessor_ The sensorProcessor to use in this callback.
    */
   void pointCloudCallback(sensor_msgs::msg::PointCloud2::ConstSharedPtr pointCloudMsg, bool publishPointCloud,
-                          const SensorProcessorBase::Ptr& sensorProcessor_);
+                          const SensorProcessorBase::Ptr& sensorProcessor_, const std::string& sourceName = "");
 
   /*!
    * Callback function for the update timer. Forces an update of the map from
